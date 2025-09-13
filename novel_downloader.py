@@ -189,9 +189,13 @@ def extract_chapters(soup):
             continue
 
         raw_title = a_tag.get_text(strip=True)
-        
-        # 保留原始标题，不进行格式化
-        final_title = raw_title
+
+        # 按参考代码格式化标题：保留番外/特别篇/if线，其余规范为“第N章 标题”
+        if re.match(r'^(番外|特别篇|if线)\s*', raw_title):
+            final_title = raw_title
+        else:
+            clean_title = re.sub(r'^第[一二三四五六七八九十百千\d]+章\s*', '', raw_title).strip()
+            final_title = f"第{idx+1}章 {clean_title}"
 
         chapters.append({
             "id": a_tag['href'].split('/')[-1],
@@ -393,9 +397,8 @@ def down_text(chapter_id, headers, book_id=None):
                 return best_title, best_content
 
         except Exception as e:
-            if not gui_callback:
-                with print_lock:
-                    print(f"API {api_name} 请求异常: {str(e)[:50]}...，尝试切换")
+            with print_lock:
+                print(f"API {api_name} 请求异常: {str(e)[:50]}...，尝试切换")
             time.sleep(0.5)
             continue
 
@@ -403,9 +406,8 @@ def down_text(chapter_id, headers, book_id=None):
     if best_content:
         return best_title, best_content
     else:
-        if not gui_callback:
-            with print_lock:
-                print(f"章节 {chapter_id} 所有API均失败")
+        with print_lock:
+            print(f"章节 {chapter_id} 所有API均失败")
         return None, None
 
 

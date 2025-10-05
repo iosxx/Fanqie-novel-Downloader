@@ -48,11 +48,12 @@ def build_executable(variant="release", executable_name=None):
         name = "TomatoNovelDownloader-debug" if variant == "debug" else "TomatoNovelDownloader"
     
     # 检查是否有对应的spec文件
-    spec_file = f"{variant}.spec" if variant == "debug" else "build.spec"
+    spec_file = "debug.spec" if variant == "debug" else "build.spec"
     
     if os.path.exists(spec_file):
         print(f"Using {spec_file} configuration file")
-        cmd = [sys.executable, "-m", "PyInstaller", spec_file, "--clean", "--noconfirm"]
+        # 使用spec文件，但通过--name参数覆盖可执行文件名称
+        cmd = [sys.executable, "-m", "PyInstaller", spec_file, "--clean", "--noconfirm", f"--name={name}"]
     else:
         print(f"{spec_file} not found, using default configuration")
         

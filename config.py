@@ -30,24 +30,15 @@ requests.packages.urllib3.disable_warnings()
 
 # 全局配置
 CONFIG = {
-    "max_workers": 4,
+    "max_workers": 7,
     "max_retries": 3,
-    "request_timeout": 15,
+    "request_timeout": 30,
     "status_file": "chapter.json",
-    "request_rate_limit": 0.4,
-    "auth_token": "wcnmd91jb",
-    "server_url": "https://dlbkltos.s7123.xyz:5080",
-    "api_endpoints": [],
-    "download_enabled": False,  # 禁用章节下载功能
-    "batch_config": {
-        "name": "qyuing",
-        "base_url": None,
-        "batch_endpoint": None,
-        "token": None,
-        "max_batch_size": 290,
-        "timeout": 10,
-        "enabled": True
-    }
+    "request_rate_limit": 0.7,
+    "api_base_url": "https://api-return.cflin.ddns-ip.net",  # 新API基础URL
+    "api_endpoint": "/api/xiaoshuo/fanqie",  # 新API端点
+    "download_enabled": True,  # 启用章节下载功能
+    "verbose_logging": False  # 是否启用详细日志输出（GUI环境建议关闭）
 }
 
 # 全局锁
@@ -115,5 +106,5 @@ def get_headers() -> Dict[str, str]:
         "Content-Type": "application/json"
     }
 
-# 导出配置
+# 导出配置和函数
 __all__ = ['CONFIG', 'print_lock', 'make_request', 'get_headers']

@@ -58,6 +58,11 @@ class ModernNovelDownloaderGUI:
         self.search_results_data = []  # 存储搜索结果数据
         self.cover_images = {}  # 存储封面图片，防止被垃圾回收
         
+        # 性能优化：限制并发下载
+        self.max_concurrent_downloads = 2  # 限制同时下载的封面数
+        self.download_semaphore = threading.Semaphore(self.max_concurrent_downloads)
+        self.cover_download_queue = []  # 封面下载队列
+        
         # 初始化版本信息和自动更新
         self.current_version = __version__
         self.updater = AutoUpdater(__github_repo__, self.current_version)
@@ -87,16 +92,14 @@ class ModernNovelDownloaderGUI:
         # 检查已有的验证状态
         self.check_existing_verification()
 
-        # 检查上次更新状态
-        self._check_last_update_status()
+        # 禁用更新系统
+        # self._check_last_update_status()
+        # 禁用启动时自动检查更新
+        # if self.official_build and self.config.get('auto_check_update', True):
+        #     self.root.after(5000, self.check_update_silent)
 
-        # 启动时自动检查更新（仅官方构建）
-        if self.official_build and self.config.get('auto_check_update', True):
-            self.root.after(1500, self.check_update_silent)
-
-        # GUI初始化完成后获取API列表（延迟执行，确保GUI已完全显示）
-        # 在GUI启动完成后要求验证码验证并获取API
-        self.root.after(1000, self._require_captcha_verification_at_startup)
+        # 禁用启动时的API测试，避免启动卡顿
+        # self.root.after(1000, self._test_api_connection_at_startup)
     
     def setup_fonts(self):
         """设置字体"""
@@ -105,7 +108,8 @@ class ModernNovelDownloaderGUI:
             'subtitle': font.Font(family="微软雅黑", size=14, weight="bold"),
             'body': font.Font(family="微软雅黑", size=10),
             'button': font.Font(family="微软雅黑", size=10, weight="bold"),
-            'small': font.Font(family="微软雅黑", size=9)
+            'small': font.Font(family="微软雅黑", size=9),
+            'input': font.Font(family="微软雅黑", size=10)
         }
     
     def setup_styles(self):
@@ -172,17 +176,20 @@ class ModernNovelDownloaderGUI:
         self.notebook = ttk.Notebook(parent, style='Modern.TNotebook')
         self.notebook.pack(fill=tk.BOTH, expand=True)
         
-        # 搜索标签页暂时隐藏（搜索接口失效）
+        # 搜索标签页 - 暂时禁用
+        # self.search_frame = ttk.Frame(self.notebook, style='Card.TFrame')
+        # self.notebook.add(self.search_frame, text="🔍 搜索")
+        # self.create_search_tab()
         
         # 下载标签页
         self.download_frame = ttk.Frame(self.notebook, style='Card.TFrame')
         self.notebook.add(self.download_frame, text="💾 下载管理")
         self.create_download_tab()
         
-        # 设置标签页
-        self.settings_frame = ttk.Frame(self.notebook, style='Card.TFrame')
-        self.notebook.add(self.settings_frame, text="⚙️ 设置")
-        self.create_settings_tab()
+        # 隐藏设置标签页
+        # self.settings_frame = ttk.Frame(self.notebook, style='Card.TFrame')
+        # self.notebook.add(self.settings_frame, text="⚙️ 设置")
+        # self.create_settings_tab()
     
     def create_card(self, parent, title: str):
         """创建通用卡片容器，带标题栏和内边距，返回内容容器"""
@@ -219,6 +226,61 @@ class ModernNovelDownloaderGUI:
                         cursor='hand2',
                         command=command)
         return btn
+    
+    def create_search_tab(self):
+        """创建搜索标签页"""
+        # 主容器
+        main_container = tk.Frame(self.search_frame, bg=self.colors['surface'])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # 搜索卡片
+        search_card = self.create_card(main_container, "🔍 搜索小说")
+        
+        # 搜索框架
+        search_input_frame = tk.Frame(search_card, bg=self.colors['surface'])
+        search_input_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(search_input_frame, text="关键词：", 
+                font=self.fonts['body'],
+                bg=self.colors['surface'],
+                fg=self.colors['text_primary']).pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.search_entry = tk.Entry(search_input_frame, 
+                                    font=self.fonts['input'],
+                                    bg='white',
+                                    fg=self.colors['text_primary'],
+                                    insertbackground=self.colors['primary'])
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        self.search_entry.bind('<Return>', lambda e: self.search_novels())
+        
+        self.search_btn = self.create_button(search_input_frame, "🔍 搜索", 
+                                            self.search_novels, 
+                                            self.colors['primary'])
+        self.search_btn.pack(side=tk.LEFT)
+        
+        # 搜索结果区域
+        results_card = self.create_card(main_container, "📚 搜索结果")
+        
+        # 创建结果滚动区域
+        self.results_canvas = tk.Canvas(results_card, bg=self.colors['surface'], 
+                                       highlightthickness=0, height=400)
+        scrollbar = tk.Scrollbar(results_card, orient="vertical", command=self.results_canvas.yview)
+        self.results_scrollable_frame = tk.Frame(self.results_canvas, bg=self.colors['surface'])
+        
+        self.results_scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.results_canvas.configure(scrollregion=self.results_canvas.bbox("all"))
+        )
+        
+        self.results_canvas.create_window((0, 0), window=self.results_scrollable_frame, anchor="nw")
+        self.results_canvas.configure(yscrollcommand=scrollbar.set)
+        
+        self.results_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # 初始化搜索结果数据
+        self.search_results_data = []
+        self.cover_images = {}
     
     def create_download_tab(self):
         """创建下载标签页"""
@@ -374,8 +436,8 @@ class ModernNovelDownloaderGUI:
         main_container = tk.Frame(self.settings_frame, bg=self.colors['surface'])
         main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
-        # 验证设置卡片
-        verification_card = self.create_card(main_container, "🔒 人机验证")
+        # API连接卡片
+        verification_card = self.create_card(main_container, "🔒 API连接")
         
         # 验证状态显示
         verification_status_frame = tk.Frame(verification_card, bg=self.colors['surface'])
@@ -575,16 +637,19 @@ class ModernNovelDownloaderGUI:
             return False
         
         # 检查字数，听书通常word_number为0或很小
-        word_number = str(book.get('word_number', '0'))
-        if word_number == '0' or word_number == '' or (word_number.isdigit() and int(word_number) < 1000):
-            # 但要排除一些特殊情况，如果是正在连载的小说
-            creation_status = book.get('creation_status', '1')
-            serial_count = book.get('serial_count', '0')
-            if creation_status == '1' and serial_count and serial_count.isdigit() and int(serial_count) > 10:
-                # 连载中且章节数较多，可能是小说
-                pass
-            else:
-                return False
+        # 但是新API可能不返回word_number，所以如果字段不存在或为空就不过滤
+        word_number = book.get('word_number')
+        if word_number is not None and word_number != '':
+            word_number_str = str(word_number)
+            if word_number_str == '0' or (word_number_str.isdigit() and int(word_number_str) < 1000):
+                # 但要排除一些特殊情况，如果是正在连载的小说
+                creation_status = book.get('creation_status', '1')
+                serial_count = book.get('serial_count', '0')
+                if creation_status == '1' and serial_count and serial_count.isdigit() and int(serial_count) > 10:
+                    # 连载中且章节数较多，可能是小说
+                    pass
+                else:
+                    return False
         
         # 检查书籍类型字段
         book_type = book.get('book_type', '0')
@@ -709,76 +774,37 @@ class ModernNovelDownloaderGUI:
         content_frame = tk.Frame(card_frame, bg='white')
         content_frame.pack(fill=tk.X, padx=15, pady=15)
         
-        # 左侧：封面图片
-        cover_frame = tk.Frame(content_frame, bg='white')
-        cover_frame.pack(side=tk.LEFT, padx=(0, 15))
-        
-        # 创建封面占位符
-        cover_label = tk.Label(cover_frame, text="📚\n加载中...", 
-                              font=self.fonts['small'],
-                              bg='#f0f0f0',
-                              fg=self.colors['text_secondary'],
-                              relief=tk.SUNKEN, bd=1)
-        cover_label.pack()
-        
         # 异步加载封面
         cover_url = novel.get('thumb_url') or novel.get('expand_thumb_url') or novel.get('audio_thumb_url_hd')
-        print(f"尝试加载封面: {novel.get('book_name', '未知')} - URL: {cover_url}")
         
-        # 调试：显示所有可能的封面URL
-        debug_urls = {
-            'thumb_url': novel.get('thumb_url'),
-            'expand_thumb_url': novel.get('expand_thumb_url'), 
-            'audio_thumb_url_hd': novel.get('audio_thumb_url_hd')
-        }
-        print(f"所有封面URL选项: {debug_urls}")
-        
-        # 调试：检查PIL导入状态
-        try:
-            import PIL
-            from PIL import Image, ImageTk
-            print(f"PIL版本: {PIL.__version__}, Image模块: {Image}, ImageTk模块: {ImageTk}")
-        except ImportError as e:
-            print(f"PIL导入失败: {e}")
-        
+        # 只有有封面URL时才创建封面框架
         if cover_url:
-            def load_cover():
-                try:
-                    print(f"开始下载封面: {cover_url}")
-                    cover_image = self.download_image(cover_url, (120, 160))
-                    if cover_image:
-                        print(f"封面下载成功: {novel.get('book_name', '未知')}")
-                        book_id = novel.get('book_id', '')
-                        self.root.after(0, lambda img=cover_image, bid=book_id: self._update_cover_label(cover_label, img, bid))
-                    else:
-                        print(f"主封面下载失败，尝试备用URL")
-                        # 如果主封面加载失败，尝试其他封面URL
-                        alt_urls = [
-                            novel.get('expand_thumb_url'),
-                            novel.get('audio_thumb_url_hd'),
-                            novel.get('horiz_thumb_url')
-                        ]
-                        for alt_url in alt_urls:
-                            if alt_url and alt_url != cover_url:
-                                print(f"尝试备用封面URL: {alt_url}")
-                                alt_image = self.download_image(alt_url, (120, 160))
-                                if alt_image:
-                                    print(f"备用封面下载成功")
-                                    book_id = novel.get('book_id', '')
-                                    self.root.after(0, lambda img=alt_image, bid=book_id: self._update_cover_label(cover_label, img, bid))
-                                    break
-                        else:
-                            # 所有封面都加载失败，显示默认图标
-                            print(f"所有封面URL都加载失败")
-                            self.root.after(0, lambda: cover_label.config(text="📚\n暂无封面", bg='#f0f0f0'))
-                except Exception as e:
-                    print(f"封面加载异常: {e}")
-                    self.root.after(0, lambda: cover_label.config(text="📚\n加载失败", bg='#f0f0f0'))
+            # 左侧：封面图片
+            cover_frame = tk.Frame(content_frame, bg='white')
+            cover_frame.pack(side=tk.LEFT, padx=(0, 15))
             
+            # 创建封面占位符（先不显示）
+            cover_label = tk.Label(cover_frame)
+            
+            def load_cover():
+                # 使用信号量限制并发
+                with self.download_semaphore:
+                    try:
+                        cover_image = self.download_image(cover_url, (120, 160))
+                        if cover_image:
+                            book_id = novel.get('book_id', '')
+                            self.root.after(0, lambda img=cover_image, bid=book_id: self._update_cover_label(cover_label, img, bid))
+                            # 图片加载成功才显示
+                            self.root.after(0, lambda: cover_label.pack())
+                        else:
+                            # 如果加载失败，销毁封面框架
+                            self.root.after(0, lambda: cover_frame.destroy())
+                    except Exception:
+                        # 出错时销毁封面框架
+                        self.root.after(0, lambda: cover_frame.destroy())
+            
+            # 延迟启动下载，避免同时创建过多线程
             threading.Thread(target=load_cover, daemon=True).start()
-        else:
-            print(f"没有找到封面URL: {novel.get('book_name', '未知')}")
-            cover_label.config(text="📚\n暂无封面", bg='#f0f0f0')
         
         # 右侧：详细信息
         info_frame = tk.Frame(content_frame, bg='white')
@@ -926,17 +952,13 @@ class ModernNovelDownloaderGUI:
             if label.winfo_exists():  # 检查标签是否还存在
                 # 将图片存储到全局缓存中，防止被垃圾回收
                 self.cover_images[book_id] = image
-                # 更新标签显示图片，移除文本
-                label.config(image=image, text="", bg='white')
+                # 更新标签显示图片
+                label.config(image=image, bg='white', width=120, height=160)
                 # 设置标签的图片引用
                 label.image = image
-                print(f"封面更新成功，书籍ID: {book_id}")
-            else:
-                print("标签已被销毁，无法更新封面")
-        except Exception as e:
-            print(f"更新封面标签失败: {e}")
-            if label.winfo_exists():
-                label.config(text="📚\n显示失败", bg='#f0f0f0')
+        except Exception:
+            # 静默处理错误
+            pass
     
     def download_selected_novel(self, novel):
         """下载选中的小说"""
@@ -952,20 +974,12 @@ class ModernNovelDownloaderGUI:
     
     def download_image(self, url, size=(120, 160)):
         """下载并调整图片大小"""
-        print(f"=== 开始下载图片 ===")
-        print(f"原始URL: {url}")
-        print(f"目标尺寸: {size}")
-        
         if not url:
-            print("URL为空，返回None")
             return None
             
-        # 调试：检查当前PIL模块状态
         try:
             from PIL import Image, ImageTk
-            print(f"PIL模块检查通过")
-        except ImportError as e:
-            print(f"CRITICAL: PIL模块导入失败: {e}")
+        except ImportError:
             return None
             
         try:
@@ -999,7 +1013,7 @@ class ModernNovelDownloaderGUI:
             
             for i, test_url in enumerate(urls_to_try):
                 try:
-                    print(f"尝试URL {i+1}/{len(urls_to_try)}: {test_url[:100]}...")
+                    # 静默处理，不输出调试信息
                     
                     response = requests.get(test_url, headers=headers, timeout=15)
                     response.raise_for_status()
@@ -1008,10 +1022,7 @@ class ModernNovelDownloaderGUI:
                     content_type = response.headers.get('content-type', '')
                     content_length = len(response.content)
                     
-                    print(f"响应: {content_type}, 大小: {content_length} bytes")
-                    
                     if not content_type.startswith('image/') or content_length < 1000:
-                        print(f"无效的图片响应，跳过")
                         continue
                     
                     # 尝试打开图片
@@ -1031,25 +1042,21 @@ class ModernNovelDownloaderGUI:
                         image = image.resize(size, Image.Resampling.LANCZOS)
                         photo = ImageTk.PhotoImage(image)
                         
-                        print(f"封面加载成功！")
                         return photo
                         
-                    except Exception as img_error:
-                        print(f"PIL处理失败: {img_error}")
+                    except Exception:
                         continue
                         
                 except requests.RequestException as req_error:
-                    print(f"请求失败: {req_error}")
+                    pass  # 静默处理
                     continue
                 except Exception as e:
-                    print(f"URL处理失败: {e}")
+                    pass  # 静默处理
                     continue
             
-            print("所有URL都失败了")
             return None
                 
-        except Exception as e:
-            print(f"图片下载完全失败: {e}")
+        except Exception:
             return None
     
     def show_book_details(self):
@@ -1446,14 +1453,13 @@ class ModernNovelDownloaderGUI:
             self.log(f"清理设置文件失败: {str(e)}")
     
     def start_download(self):
-        """开始下载"""
+        """开始下载 - 先显示章节选择对话框"""
         if self.is_downloading:
             return
             
         book_id = self.book_id_entry.get().strip()
         save_path = self.save_path_entry.get().strip()
         file_format = self.format_var.get()
-        mode = 'full'  # 固定为整本下载
         
         if not book_id:
             messagebox.showerror("错误", "请输入书籍ID")
@@ -1462,7 +1468,204 @@ class ModernNovelDownloaderGUI:
         if not os.path.isdir(save_path):
             messagebox.showerror("错误", "保存路径无效")
             return
+        
+        # 先获取章节列表，然后显示选择对话框
+        self.log("正在获取章节列表...")
+        threading.Thread(target=self._fetch_chapters_and_show_dialog,
+                        args=(book_id, save_path, file_format),
+                        daemon=True).start()
+    
+    def _fetch_chapters_and_show_dialog(self, book_id, save_path, file_format):
+        """获取章节列表并显示选择对话框"""
+        try:
+            from api_manager import api_manager
             
+            # 获取章节列表
+            chapters = api_manager.get_chapter_list(book_id)
+            
+            if not chapters:
+                self.root.after(0, lambda: messagebox.showerror("错误", "无法获取章节列表"))
+                return
+            
+            # 在主线程中显示对话框
+            self.root.after(0, lambda: self._show_chapter_selection_dialog(
+                book_id, save_path, file_format, chapters))
+            
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("错误", f"获取章节列表失败: {str(e)}"))
+    
+    def _show_chapter_selection_dialog(self, book_id, save_path, file_format, chapters):
+        """显示章节选择对话框"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("选择下载章节")
+        dialog.geometry("800x600")
+        dialog.configure(bg=self.colors['background'])
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # 居中显示
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (800 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (600 // 2)
+        dialog.geometry(f"800x600+{x}+{y}")
+        
+        # 主容器
+        main_frame = tk.Frame(dialog, bg=self.colors['background'])
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # 标题
+        title_label = tk.Label(main_frame,
+                              text=f"共找到 {len(chapters)} 个章节，请选择下载范围",
+                              font=self.fonts['subtitle'],
+                              bg=self.colors['background'],
+                              fg=self.colors['text_primary'])
+        title_label.pack(pady=(0, 10))
+        
+        # 快速选择按钮区
+        quick_frame = tk.Frame(main_frame, bg=self.colors['background'])
+        quick_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(quick_frame, text="快速选择:",
+                font=self.fonts['body'],
+                bg=self.colors['background'],
+                fg=self.colors['text_primary']).pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.create_button(quick_frame, "全选",
+                          lambda: self._select_all_chapters(chapter_listbox, chapters),
+                          self.colors['primary']).pack(side=tk.LEFT, padx=5)
+        
+        self.create_button(quick_frame, "前100章",
+                          lambda: self._select_range_chapters(chapter_listbox, 0, min(100, len(chapters))),
+                          self.colors['secondary']).pack(side=tk.LEFT, padx=5)
+        
+        self.create_button(quick_frame, "最新100章",
+                          lambda: self._select_range_chapters(chapter_listbox, max(0, len(chapters)-100), len(chapters)),
+                          self.colors['secondary']).pack(side=tk.LEFT, padx=5)
+        
+        # 章节范围输入
+        range_frame = tk.Frame(main_frame, bg=self.colors['background'])
+        range_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(range_frame, text="自定义范围:",
+                font=self.fonts['body'],
+                bg=self.colors['background'],
+                fg=self.colors['text_primary']).pack(side=tk.LEFT, padx=(0, 10))
+        
+        tk.Label(range_frame, text="从第",
+                font=self.fonts['body'],
+                bg=self.colors['background'],
+                fg=self.colors['text_primary']).pack(side=tk.LEFT)
+        
+        start_entry = tk.Entry(range_frame, font=self.fonts['body'], width=8)
+        start_entry.pack(side=tk.LEFT, padx=5)
+        start_entry.insert(0, "1")
+        
+        tk.Label(range_frame, text="章到第",
+                font=self.fonts['body'],
+                bg=self.colors['background'],
+                fg=self.colors['text_primary']).pack(side=tk.LEFT)
+        
+        end_entry = tk.Entry(range_frame, font=self.fonts['body'], width=8)
+        end_entry.pack(side=tk.LEFT, padx=5)
+        end_entry.insert(0, str(len(chapters)))
+        
+        def apply_custom_range():
+            try:
+                start = int(start_entry.get()) - 1
+                end = int(end_entry.get())
+                if start < 0 or end > len(chapters) or start >= end:
+                    messagebox.showwarning("无效范围", "请输入有效的章节范围")
+                    return
+                self._select_range_chapters(chapter_listbox, start, end)
+            except ValueError:
+                messagebox.showwarning("输入错误", "请输入有效的数字")
+        
+        self.create_button(range_frame, "应用", apply_custom_range,
+                          self.colors['success']).pack(side=tk.LEFT, padx=5)
+        
+        # 章节列表区域
+        list_frame = tk.Frame(main_frame, bg=self.colors['surface'])
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        chapter_listbox = tk.Listbox(list_frame,
+                                     font=self.fonts['body'],
+                                     bg='white',
+                                     fg=self.colors['text_primary'],
+                                     selectmode=tk.EXTENDED,
+                                     yscrollcommand=scrollbar.set)
+        chapter_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=chapter_listbox.yview)
+        
+        # 填充章节列表
+        for idx, chapter in enumerate(chapters):
+            chapter_title = chapter.get("chapter_name", f"第{idx+1}章")
+            chapter_listbox.insert(tk.END, f"{idx+1}. {chapter_title}")
+        
+        # 默认全选
+        chapter_listbox.select_set(0, tk.END)
+        
+        # 选择信息
+        selection_info = tk.Label(main_frame,
+                                 text=f"已选择: {len(chapters)} 章",
+                                 font=self.fonts['body'],
+                                 bg=self.colors['background'],
+                                 fg=self.colors['text_secondary'])
+        selection_info.pack(pady=(0, 10))
+        
+        def update_selection_info(event=None):
+            selected_count = len(chapter_listbox.curselection())
+            selection_info.config(text=f"已选择: {selected_count} 章")
+        
+        chapter_listbox.bind('<<ListboxSelect>>', update_selection_info)
+        
+        # 按钮区
+        button_frame = tk.Frame(main_frame, bg=self.colors['background'])
+        button_frame.pack(fill=tk.X)
+        
+        def start_selected_download():
+            selected_indices = chapter_listbox.curselection()
+            if not selected_indices:
+                messagebox.showwarning("未选择章节", "请至少选择一个章节")
+                return
+            
+            start_chapter = min(selected_indices)
+            end_chapter = max(selected_indices)
+            
+            is_continuous = len(selected_indices) == (end_chapter - start_chapter + 1)
+            
+            if not is_continuous:
+                result = messagebox.askyesno("非连续选择",
+                                           f"您选择了非连续的章节，系统将下载第{start_chapter+1}章到第{end_chapter+1}章之间的所有章节。\n\n是否继续？")
+                if not result:
+                    return
+            
+            dialog.destroy()
+            self._start_download_with_range(book_id, save_path, file_format,
+                                           start_chapter, end_chapter)
+        
+        self.create_button(button_frame, "🚀 开始下载选中章节",
+                          start_selected_download,
+                          self.colors['success']).pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.create_button(button_frame, "❌ 取消",
+                          dialog.destroy,
+                          self.colors['error']).pack(side=tk.RIGHT)
+    
+    def _select_all_chapters(self, listbox, chapters):
+        """全选章节"""
+        listbox.select_set(0, tk.END)
+    
+    def _select_range_chapters(self, listbox, start, end):
+        """选择指定范围的章节"""
+        listbox.selection_clear(0, tk.END)
+        for i in range(start, end):
+            listbox.select_set(i)
+    
+    def _start_download_with_range(self, book_id, save_path, file_format, start_chapter, end_chapter):
+        """开始下载指定范围的章节"""
         self.is_downloading = True
         self.start_time = time.time()
         self.download_btn.config(state=tk.DISABLED, bg=self.colors['text_secondary'], text="下载中...")
@@ -1471,17 +1674,19 @@ class ModernNovelDownloaderGUI:
         self.log_text.config(state=tk.NORMAL)
         self.log_text.delete(1.0, tk.END)
         self.log_text.config(state=tk.DISABLED)
-        self.log(f"开始下载书籍: {book_id}")
+        self.log(f"开始下载书籍: {book_id} (第{start_chapter+1}章 - 第{end_chapter+1}章)")
         
-        # 在新线程中执行下载
-        threading.Thread(target=self._download_thread, args=(book_id, save_path, file_format), daemon=True).start()
+        threading.Thread(target=self._download_thread,
+                        args=(book_id, save_path, file_format, start_chapter, end_chapter),
+                        daemon=True).start()
     
-    def _download_thread(self, book_id, save_path, file_format):
-        """下载线程函数 - 完全集成enhanced_downloader.py的高速下载功能"""
+    def _download_thread(self, book_id, save_path, file_format, start_chapter=None, end_chapter=None):
+        """下载线程函数 - 支持章节范围选择"""
         try:
-            # 检查API接口是否已经获取
-            if not novel_downloader.CONFIG["api_endpoints"]:
-                # API列表为空，可能验证失败或未验证
+            # 检查API连接
+            from api_manager import api_manager
+            if not api_manager.test_connection():
+                # API连接失败
                 self.root.after(0, lambda: messagebox.showerror(
                     "API未验证",
                     "API接口列表为空，可能启动时验证失败。\n\n"
@@ -1536,12 +1741,12 @@ class ModernNovelDownloaderGUI:
             # 整本下载 - 直接使用增强型下载器（移除章节下载模式）
             self.root.after(0, lambda: self.progress_callback(15, f"启动enhanced_downloader.py高速下载模式..."))
             
-            # 直接使用增强型下载器的run_download方法
+            # 直接使用增强型下载器的run_download方法，传递章节范围参数
             downloader = self.api.enhanced_downloader
             downloader.set_progress_callback(gui_progress_callback)
 
-            # 在线程中运行下载，传递GUI验证回调
-            downloader.run_download(book_id, save_path, file_format)
+            # 在线程中运行下载，传递GUI验证回调和章节范围
+            downloader.run_download(book_id, save_path, file_format, start_chapter, end_chapter)
             
             # 检查是否取消
             if downloader.is_cancelled:
@@ -1911,24 +2116,28 @@ class ModernNovelDownloaderGUI:
 
         return self.api
 
-    def _require_captcha_verification_at_startup(self):
-        """在启动时要求验证码验证并获取API列表"""
+    def _test_api_connection_at_startup(self):
+        """在启动时测试API连接"""
         try:
-            self.log("程序启动完成，准备进行API验证...")
+            self.log("程序启动完成，正在测试API连接...")
             
-            # 先检查是否有保存的API
-            saved_api_data = api_manager.load_apis()
-            if saved_api_data:
-                # 有保存的API，询问用户选择
-                self._show_api_selection_dialog(saved_api_data)
-                return
-            
-            # 没有保存的API，进行网络验证
-            self._perform_network_verification()
+            # 测试API连接
+            from api_manager import api_manager
+            if api_manager.test_connection():
+                self.log("API连接正常，可以开始使用")
+                self.update_verification_status("API连接正常 ✓", self.colors['success'])
+            else:
+                self.log("API连接失败，请检查网络")
+                self.update_verification_status("API连接失败", self.colors['error'])
+                messagebox.showwarning(
+                    "API连接失败",
+                    "无法连接到API服务器。\n\n"
+                    "请检查网络连接，稍后可在设置中重新测试。"
+                )
             
         except Exception as e:
-            self.log(f"启动验证失败: {str(e)}")
-            messagebox.showerror("启动错误", f"启动验证失败: {str(e)}")
+            self.log(f"API测试失败: {str(e)}")
+            messagebox.showerror("启动错误", f"API测试失败: {str(e)}")
     
     def _show_api_selection_dialog(self, saved_api_data):
         """显示API选择对话框"""
@@ -2162,11 +2371,10 @@ API数量: {api_count}个
             self.log("正在连接服务器获取验证码挑战...")
             
             if self.api.initialize_api():
-                self.log("验证码验证成功！API接口已保存到内存")
+                self.log("API连接成功！")
                 import novel_downloader
-                api_count = len(novel_downloader.CONFIG["api_endpoints"])
                 messagebox.showinfo(
-                    "验证成功", 
+                    "连接成功", 
                     f"验证码验证成功！\n已获取{api_count}个API接口并保存到内存。\n现在可以正常使用下载功能了。"
                 )
             else:
@@ -2625,20 +2833,19 @@ API数量: {api_count}个
                 messagebox.showerror("错误", "无法创建API实例")
                 return
             
-            # 强制重新获取API接口
+            # 测试API连接
             import novel_downloader
-            novel_downloader.CONFIG["api_endpoints"] = []  # 清空现有接口
+            from api_manager import api_manager
             
-            # 进行验证和API获取
-            self.update_verification_status("正在验证...", self.colors['warning'])
+            # 进行连接测试
+            self.update_verification_status("正在测试连接...", self.colors['warning'])
             
-            if self.api.initialize_api():
-                # 验证成功，更新状态
-                api_count = len(novel_downloader.CONFIG["api_endpoints"])
-                self.update_verification_status(f"验证成功 ✓ (已获取{api_count}个API接口)", self.colors['success'])
+            if api_manager.test_connection():
+                # 连接成功，更新状态
+                self.update_verification_status("API连接正常 ✓", self.colors['success'])
                 messagebox.showinfo(
-                    "验证成功",
-                    f"验证码验证成功！\n已获取{api_count}个API接口。\n现在可以正常使用下载功能了。"
+                    "连接成功",
+                    "API连接测试成功！\n现在可以正常使用下载功能了。"
                 )
             else:
                 self.update_verification_status("验证失败", self.colors['error'])
@@ -2665,13 +2872,9 @@ API数量: {api_count}个
             if "TOMATO_VERIFICATION_TOKEN" in os.environ:
                 del os.environ["TOMATO_VERIFICATION_TOKEN"]
                 
-            # 清除内存中的API接口
-            import novel_downloader
-            novel_downloader.CONFIG["api_endpoints"] = []
-
             # 更新状态显示
-            self.update_verification_status("已清除验证令牌和API接口", self.colors['text_secondary'])
-            messagebox.showinfo("清除成功", "验证令牌和API接口已清除\n需要重新验证才能下载")
+            self.update_verification_status("已清除设置", self.colors['text_secondary'])
+            messagebox.showinfo("清除成功", "设置已清除")
         except Exception as e:
             messagebox.showerror("清除失败", f"清除失败: {str(e)}")
     
@@ -2707,12 +2910,12 @@ API数量: {api_count}个
         title_label.pack(pady=20)
         
         # 当前API状态
-        current_api_count = len(novel_downloader.CONFIG["api_endpoints"])
-        batch_enabled = novel_downloader.CONFIG["batch_config"]["enabled"]
+        from api_manager import api_manager
+        api_connected = api_manager.test_connection()
         
         status_text = f"""当前API状态:
-API数量: {current_api_count}个
-批量下载: {'启用' if batch_enabled else '禁用'}"""
+连接状态: {'正常' if api_connected else '失败'}
+API服务器: {CONFIG.get('api_base_url', '未配置')}"""
         
         status_label = tk.Label(dialog, 
                               text=status_text,
@@ -2771,22 +2974,8 @@ API数量: {saved_api_count}个
                 dialog.destroy()
         
         def export_api():
-            if current_api_count > 0:
-                try:
-                    import json
-                    filename = f"api_backup_{int(time.time())}.json"
-                    backup_data = {
-                        "timestamp": time.time(),
-                        "api_endpoints": novel_downloader.CONFIG["api_endpoints"],
-                        "batch_config": novel_downloader.CONFIG["batch_config"]
-                    }
-                    with open(filename, 'w', encoding='utf-8') as f:
-                        json.dump(backup_data, f, ensure_ascii=False, indent=2)
-                    messagebox.showinfo("成功", f"API配置已导出到: {filename}")
-                except Exception as e:
-                    messagebox.showerror("错误", f"导出失败: {str(e)}")
-            else:
-                messagebox.showwarning("警告", "当前没有可导出的API配置")
+            # 新API不支持导出功能
+            messagebox.showinfo("提示", "当前使用的新API架构不需要导出配置")
         
         # 刷新API
         refresh_btn = self.create_button(button_frame, "🔄 刷新API", refresh_api, self.colors['primary'])
@@ -2808,18 +2997,15 @@ API数量: {saved_api_count}个
 
 
     def check_existing_verification(self):
-        """检查已有的验证状态"""
-        # 检查API接口是否已获取
+        """检查API连接状态"""
+        # 检查新API连接
         import novel_downloader
-        if novel_downloader.CONFIG["api_endpoints"]:
-            api_count = len(novel_downloader.CONFIG["api_endpoints"])
-            self.update_verification_status(f"已验证 ✓ (已获取{api_count}个API接口)", self.colors['success'])
+        from api_manager import api_manager
+        
+        if api_manager.test_connection():
+            self.update_verification_status("API连接正常 ✓", self.colors['success'])
         else:
-            verification_token = os.environ.get("TOMATO_VERIFICATION_TOKEN")
-            if verification_token:
-                self.update_verification_status("已保存验证令牌但API接口未获取", self.colors['warning'])
-            else:
-                self.update_verification_status("未验证 (需要进行验证码验证)", self.colors['text_secondary'])
+            self.update_verification_status("API连接失败 (请检查网络)", self.colors['error'])
 
     def check_update_silent(self):
         """在后台静默检查更新"""

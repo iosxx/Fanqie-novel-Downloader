@@ -118,10 +118,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
+        shell: bash
 
       - name: Build application (${{ matrix.variant }})
         run: |
-          python build_app.py --variant=${{ matrix.variant }} --target-name=${{ matrix.executable }}
+          python build_app.py --variant=${{ matrix.variant }} --name=${{ matrix.executable }}
+        shell: bash
 
       - name: Verify build
         run: |
@@ -158,32 +160,53 @@ jobs:
         with:
           path: artifacts
 
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -lh release/
+        shell: bash
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.version.outputs.version }}
           name: TomatoNovelDownloader v${{ needs.version.outputs.version }}
           body: |
-            ## ${{ github.event.head_commit.message }}
+            ## 📦 Release ${{ needs.version.outputs.version }}
             
-            **构建信息:**
-            - 构建时间: ${{ needs.version.outputs.build_time }}
-            - 提交哈希: ${{ github.sha }}
-            - 分支: ${{ github.ref_name }}
-            - 提交者: ${{ github.event.head_commit.author.name }}
+            ### 提交信息
+            ${{ github.event.head_commit.message }}
+            
+            ### 构建信息
+            - **构建时间**: ${{ needs.version.outputs.build_time }}
+            - **提交哈希**: `${{ github.sha }}`
+            - **分支**: ${{ github.ref_name }}
+            - **提交者**: ${{ github.event.head_commit.author.name }}
 
-            **支持平台:**
-            - 💻 Windows (x64): `TomatoNovelDownloader-windows` + debug版
-            - 🐧 Linux (x64): `TomatoNovelDownloader-linux` + debug版  
-            - 🍎 macOS: `TomatoNovelDownloader-macos` + debug版
+            ### 支持平台
+            - 💻 **Windows (x64)**:
+              - `TomatoNovelDownloader.exe` (Release版，无控制台)
+              - `TomatoNovelDownloader-debug.exe` (Debug版，带控制台输出)
+            - 🐧 **Linux (x64)**:
+              - `TomatoNovelDownloader-linux` (Release版)
+              - `TomatoNovelDownloader-debug-linux` (Debug版)
+            - 🍎 **macOS (Intel & Apple Silicon)**:
+              - `TomatoNovelDownloader-macos` (Release版)
+              - `TomatoNovelDownloader-debug-macos` (Debug版)
 
-            **使用说明:**
-            - 分发版：正常使用的版本，无控制台输出
-            - Debug版：包含详细调试信息，遇到问题时使用
+            ### 使用说明
+            1. **Release版**: 适合日常使用，无控制台窗口，界面更简洁
+            2. **Debug版**: 包含详细日志输出，遇到问题时使用此版本方便排查
+            
+            ### 下载提示
+            - Windows用户请下载 `.exe` 文件
+            - Linux用户请下载后执行 `chmod +x` 赋予执行权限
+            - macOS用户首次运行可能需要在"系统偏好设置 > 安全性与隐私"中允许运行
 
-          files: |
-            artifacts/**/*
+          files: release/*
           draft: false
           prerelease: false
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

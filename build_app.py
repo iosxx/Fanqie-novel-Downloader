@@ -38,22 +38,30 @@ def build_executable(variant="release", executable_name=None):
     Args:
         variant: 构建变体 ('release' 或 'debug')
         executable_name: 自定义可执行文件名称（不包含扩展名）
+    
+    Returns:
+        tuple: (success, built_name, target_name)
+            - success: 构建是否成功
+            - built_name: spec文件中定义的原始名称
+            - target_name: 期望的最终名称
     """
     print(f"Starting build process for {variant} variant...")
     
-    # 确定可执行文件名称
+    # 确定目标可执行文件名称
     if executable_name:
-        name = executable_name
+        target_name = executable_name
     else:
-        name = "TomatoNovelDownloader-debug" if variant == "debug" else "TomatoNovelDownloader"
+        target_name = "TomatoNovelDownloader-debug" if variant == "debug" else "TomatoNovelDownloader"
     
     # 检查是否有对应的spec文件
     spec_file = "debug.spec" if variant == "debug" else "build.spec"
     
     if os.path.exists(spec_file):
         print(f"Using {spec_file} configuration file")
-        # 使用spec文件，但通过--name参数覆盖可执行文件名称
-        cmd = [sys.executable, "-m", "PyInstaller", spec_file, "--clean", "--noconfirm", f"--name={name}"]
+        # 使用spec文件时不能使用--name参数，需要使用spec中定义的名称
+        cmd = [sys.executable, "-m", "PyInstaller", spec_file, "--clean", "--noconfirm"]
+        # spec文件中定义的默认名称
+        built_name = "TomatoNovelDownloader-debug" if variant == "debug" else "TomatoNovelDownloader"
     else:
         print(f"{spec_file} not found, using default configuration")
         
@@ -61,7 +69,7 @@ def build_executable(variant="release", executable_name=None):
         cmd = [
             sys.executable, "-m", "PyInstaller",
             "--onefile",
-            f"--name={name}",
+            f"--name={target_name}",
         ]
         
         # 根据变体选择窗口模式或控制台模式
@@ -73,7 +81,7 @@ def build_executable(variant="release", executable_name=None):
         # 添加隐藏导入
         hidden_imports = [
             "bs4",
-            "beautifulsoup4", 
+            "beautifulsoup4",
             "fake_useragent",
             "fake_useragent.data",
             "tqdm",
@@ -86,7 +94,7 @@ def build_executable(variant="release", executable_name=None):
             "PIL.ImageDraw",
             "PIL.ImageFile",
             "PIL.ImageFont",
-            "PIL.ImageOps", 
+            "PIL.ImageOps",
             "PIL.JpegImagePlugin",
             "PIL.PngImagePlugin",
             "PIL.GifImagePlugin",
@@ -105,16 +113,26 @@ def build_executable(variant="release", executable_name=None):
         
         # 添加入口文件
         cmd.append("gui.py")
+        
+        # 没有使用spec文件时，built_name和target_name相同
+        built_name = target_name
     
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True, encoding='utf-8')
         print("Build successful")
         print(result.stdout)
-        return True, name
+        # 如果使用spec文件，返回built_name和target_name
+        if os.path.exists(spec_file):
+            return True, built_name, target_name
+        else:
+            return True, target_name, target_name
     except subprocess.CalledProcessError as e:
         print("Build failed")
         print(f"Error output: {e.stderr}")
-        return False, name
+        if os.path.exists(spec_file):
+            return False, built_name, target_name
+        else:
+            return False, target_name, target_name
 
 def check_output(expected_name):
     """检查编译输出
@@ -174,25 +192,26 @@ def main():
     parser.add_argument("--variant", choices=["release", "debug"], default="release",
                        help="Build variant (release or debug)")
     parser.add_argument("--name", type=str, help="Custom executable name (without extension)")
-    parser.add_argument("--target-name", type=str, help="Target executable name for renaming")
     
     args = parser.parse_args()
     
     # 构建可执行文件
-    success, built_name = build_executable(args.variant, args.name)
+    success, built_name, target_name = build_executable(args.variant, args.name)
     
     if success:
+        # 先检查构建输出
         if check_output(built_name):
-            # 如果指定了目标名称，进行重命名
-            if args.target_name and args.target_name != built_name:
-                if rename_executable(built_name, args.target_name):
-                    print(f"Build completed successfully! Final executable: {args.target_name}")
+            # 如果built_name和target_name不同，需要重命名
+            if built_name != target_name:
+                if rename_executable(built_name, target_name):
+                    print(f"Build completed successfully! Final executable: {target_name}")
+                    return True
                 else:
                     print("Build successful but renaming failed")
                     return False
             else:
                 print(f"Build completed successfully! Executable: {built_name}")
-            return True
+                return True
         else:
             print("Build output check failed")
             return False

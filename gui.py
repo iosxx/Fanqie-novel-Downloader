@@ -288,6 +288,29 @@ class ModernNovelDownloaderGUI:
         main_container = tk.Frame(self.download_frame, bg=self.colors['surface'])
         main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
+        # 工具栏（在顶部添加）
+        toolbar_frame = tk.Frame(main_container, bg=self.colors['surface'])
+        toolbar_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # 右侧工具按钮
+        toolbar_right = tk.Frame(toolbar_frame, bg=self.colors['surface'])
+        toolbar_right.pack(side=tk.RIGHT)
+        
+        # 检查更新按钮
+        check_update_btn = self.create_button(toolbar_right,
+                                              "🔄 检查更新",
+                                              self.manual_check_update,
+                                              self.colors['primary'])
+        check_update_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # 版本信息标签
+        version_label = tk.Label(toolbar_frame,
+                                text=f"版本: {self.current_version}",
+                                font=self.fonts['small'],
+                                bg=self.colors['surface'],
+                                fg=self.colors['text_secondary'])
+        version_label.pack(side=tk.LEFT, padx=5)
+        
         # 下载设置卡片
         download_card = self.create_card(main_container, "💾 下载设置")
         
@@ -3042,6 +3065,37 @@ API数量: {saved_api_count}个
                 print(f"强制更新检查失败: {e}")
         
         threading.Thread(target=worker, daemon=True).start()
+
+    def manual_check_update(self):
+        """手动检查更新（新方法，统一入口）"""
+        try:
+            # 对于非官方构建，直接跳转到发布页
+            if not getattr(self, 'official_build', False):
+                releases_url = f"https://github.com/{__github_repo__}/releases/latest"
+                try:
+                    webbrowser.open(releases_url)
+                    messagebox.showinfo("检查更新",
+                                      "已在浏览器中打开GitHub发布页面。\n\n"
+                                      "源码运行环境不支持自动更新，\n"
+                                      "请手动下载最新版本。")
+                except Exception as e:
+                    messagebox.showerror("打开失败", f"无法打开浏览器：{str(e)}")
+                return
+            
+            # 确保 updater 已初始化
+            if not hasattr(self, 'updater') or self.updater is None:
+                messagebox.showerror("更新系统未初始化", "更新系统未正确初始化，无法检查更新。")
+                return
+            
+            # 显示检查中提示
+            self.log("正在检查更新...")
+            
+            # 调用现有的更新检测方法
+            self.check_update_now()
+            
+        except Exception as e:
+            messagebox.showerror("检查更新失败", f"无法检查更新：{str(e)}\n\n请检查网络连接。")
+            self.log(f"检查更新失败: {str(e)}")
 
     def check_update_now(self):
         """手动检查更新（带提示）"""

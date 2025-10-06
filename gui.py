@@ -3018,6 +3018,7 @@ API数量: {saved_api_count}个
         try:
             check_and_notify_update(self.updater, notify)
         except Exception as e:
+            print(f"静默检查更新失败: {e}")
     
     def check_update_force(self):
         """启动时的强制更新检查"""

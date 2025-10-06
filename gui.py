@@ -3042,7 +3042,6 @@ API数量: {saved_api_count}个
                 print(f"强制更新检查失败: {e}")
         
         threading.Thread(target=worker, daemon=True).start()
-            print(f"静默检查更新失败: {e}")
 
     def check_update_now(self):
         """手动检查更新（带提示）"""

@@ -654,7 +654,36 @@ rm -f "$0"
                 download_url = release_asset.get('download_url')
             elif debug_asset and not release_asset:
                 choice = 'debug'
-                download_url = debug_asset.get('download_url
+                download_url = debug_asset.get('download_url')
+            else:
+                # 两个版本都有，让用户选择
+                release_url = release_asset.get('download_url')
+                debug_url = debug_asset.get('download_url')
+                choice = self.show_force_update_dialog(latest_version, release_url, debug_url)
+                
+                if not choice:
+                    # 用户没有选择（不应该发生，因为禁用了关闭按钮）
+                    print("未选择版本，程序将退出")
+                    sys.exit(1)
+                
+                download_url = release_url if choice == 'release' else debug_url
+            
+            # 下载更新
+            print(f"开始下载{choice}版本...")
+            downloaded_file = self.download_update_with_progress(download_url, choice)
+            
+            if not downloaded_file:
+                print("下载失败，程序将退出")
+                sys.exit(1)
+            
+            # 替换并重启
+            print("开始替换程序...")
+            self.replace_and_restart(downloaded_file)
+            
+        except Exception as e:
+            print(f"强制更新失败: {e}")
+            sys.exit(1)
+        return None
     def _get_platform_asset(self, assets: list, prefer_debug: bool = False) -> Optional[Dict[str, Any]]:
         """
         根据平台和版本类型选择合适的下载文件
@@ -715,35 +744,6 @@ rm -f "$0"
                 except Exception:
                     continue
 
-')
-            else:
-                # 两个版本都有，让用户选择
-                release_url = release_asset.get('download_url')
-                debug_url = debug_asset.get('download_url')
-                choice = self.show_force_update_dialog(latest_version, release_url, debug_url)
-                
-                if not choice:
-                    # 用户没有选择（不应该发生，因为禁用了关闭按钮）
-                    print("未选择版本，程序将退出")
-                    sys.exit(1)
-                
-                download_url = release_url if choice == 'release' else debug_url
-            
-            # 下载更新
-            print(f"开始下载{choice}版本...")
-            downloaded_file = self.download_update_with_progress(download_url, choice)
-            
-            if not downloaded_file:
-                print("下载失败，程序将退出")
-                sys.exit(1)
-            
-            # 替换并重启
-            print("开始替换程序...")
-            self.replace_and_restart(downloaded_file)
-            
-        except Exception as e:
-            print(f"强制更新失败: {e}")
-            sys.exit(1)
         return None
     
     def download_update(self, update_info: Dict[str, Any], 

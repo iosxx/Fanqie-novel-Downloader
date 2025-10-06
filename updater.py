@@ -258,6 +258,403 @@ class AutoUpdater:
         """
         return self.checker.get_update_info() if self.checker.has_update(force) else None
     
+
+    
+    def show_force_update_dialog(self, latest_version: str, download_url_release: str, download_url_debug: str):
+        """
+        显示强制更新对话框，让用户选择下载debug版本还是release版本
+        
+        Args:
+            latest_version: 最新版本号
+            download_url_release: Release版本下载链接
+            download_url_debug: Debug版本下载链接
+            
+        Returns:
+            用户选择的版本类型：'release' 或 'debug'，如果窗口被关闭返回None
+        """
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+        except ImportError:
+            print("无法导入tkinter，跳过强制更新")
+            return None
+        
+        result = {'choice': None}
+        
+        # 创建对话框
+        dialog = tk.Tk()
+        dialog.title("强制更新")
+        dialog.geometry("500x300")
+        dialog.resizable(False, False)
+        
+        # 禁用关闭按钮
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+        
+        # 居中显示
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (500 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (300 // 2)
+        dialog.geometry(f"500x300+{x}+{y}")
+        
+        # 标题
+        title_label = tk.Label(dialog, text="🔄 发现新版本，需要更新", 
+                              font=("微软雅黑", 16, "bold"),
+                              fg="#1976D2")
+        title_label.pack(pady=20)
+        
+        # 版本信息
+        info_text = f"""当前版本: {self.current_version}
+最新版本: {latest_version}
+
+为了获得最佳体验，必须更新到最新版本。
+请选择要下载的版本类型："""
+        
+        info_label = tk.Label(dialog, text=info_text, 
+                             font=("微软雅黑", 10),
+                             justify=tk.LEFT)
+        info_label.pack(pady=10)
+        
+        # 按钮框架
+        button_frame = tk.Frame(dialog)
+        button_frame.pack(pady=30)
+        
+        def choose_release():
+            result['choice'] = 'release'
+            dialog.quit()
+            dialog.destroy()
+        
+        def choose_debug():
+            result['choice'] = 'debug'
+            dialog.quit()
+            dialog.destroy()
+        
+        # Release版本按钮
+        release_btn = tk.Button(button_frame, text="下载 Release 版本（推荐）",
+                               font=("微软雅黑", 10, "bold"),
+                               bg="#4CAF50", fg="white",
+                               padx=20, pady=10,
+                               command=choose_release)
+        release_btn.pack(side=tk.LEFT, padx=10)
+        
+        # Debug版本按钮
+        debug_btn = tk.Button(button_frame, text="下载 Debug 版本",
+                             font=("微软雅黑", 10),
+                             bg="#FF9800", fg="white",
+                             padx=20, pady=10,
+                             command=choose_debug)
+        debug_btn.pack(side=tk.LEFT, padx=10)
+        
+        # 运行对话框
+        dialog.mainloop()
+        
+        return result['choice']
+    
+    def download_update_with_progress(self, download_url: str, version_type: str) -> Optional[str]:
+        """
+        使用多线程下载更新文件并显示进度
+        
+        Args:
+            download_url: 下载链接
+            version_type: 版本类型（'release' 或 'debug'）
+            
+        Returns:
+            下载文件的路径，失败返回None
+        """
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+        except ImportError:
+            print("无法导入tkinter，使用简单下载")
+            return self._simple_download(download_url)
+        
+        # 创建进度窗口
+        progress_window = tk.Tk()
+        progress_window.title("下载更新")
+        progress_window.geometry("400x150")
+        progress_window.resizable(False, False)
+        
+        # 禁用关闭按钮
+        progress_window.protocol("WM_DELETE_WINDOW", lambda: None)
+        
+        # 居中显示
+        progress_window.update_idletasks()
+        x = (progress_window.winfo_screenwidth() // 2) - (400 // 2)
+        y = (progress_window.winfo_screenheight() // 2) - (150 // 2)
+        progress_window.geometry(f"400x150+{x}+{y}")
+        
+        # 标题
+        title_label = tk.Label(progress_window, text=f"正在下载 {version_type.upper()} 版本...",
+                              font=("微软雅黑", 12, "bold"))
+        title_label.pack(pady=10)
+        
+        # 进度条
+        progress_bar = ttk.Progressbar(progress_window, length=350, mode='determinate')
+        progress_bar.pack(pady=10)
+        
+        # 进度文本
+        progress_label = tk.Label(progress_window, text="准备下载...",
+                                 font=("微软雅黑", 9))
+        progress_label.pack(pady=5)
+        
+        # 速度和时间标签
+        speed_label = tk.Label(progress_window, text="",
+                              font=("微软雅黑", 8))
+        speed_label.pack()
+        
+        result = {'file_path': None, 'error': None}
+        
+        def download_thread():
+            try:
+                # 获取文件名
+                filename = download_url.split('/')[-1]
+                if not filename or '?' in filename:
+                    filename = f"update_{version_type}.exe"
+                
+                file_path = os.path.join(tempfile.gettempdir(), filename)
+                
+                # 下载文件
+                headers = {
+                    'User-Agent': 'Tomato-Novel-Downloader',
+                    'Accept': 'application/octet-stream'
+                }
+                
+                start_time = time.time()
+                response = requests.get(download_url, headers=headers, stream=True, timeout=60)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                
+                with open(file_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            # 更新进度
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                progress_bar['value'] = percent
+                                
+                                # 计算速度和剩余时间
+                                elapsed = time.time() - start_time
+                                if elapsed > 0:
+                                    speed = downloaded / elapsed / 1024 / 1024  # MB/s
+                                    remaining = (total_size - downloaded) / (downloaded / elapsed)
+                                    
+                                    progress_label.config(
+                                        text=f"已下载: {downloaded/1024/1024:.1f}MB / {total_size/1024/1024:.1f}MB ({percent:.1f}%)")
+                                    speed_label.config(
+                                        text=f"速度: {speed:.2f}MB/s | 剩余时间: {int(remaining)}秒")
+                            
+                            progress_window.update()
+                
+                result['file_path'] = file_path
+                progress_window.quit()
+                
+            except Exception as e:
+                result['error'] = str(e)
+                progress_window.quit()
+        
+        # 启动下载线程
+        thread = threading.Thread(target=download_thread, daemon=True)
+        thread.start()
+        
+        # 运行窗口
+        progress_window.mainloop()
+        progress_window.destroy()
+        
+        if result['error']:
+            print(f"下载失败: {result['error']}")
+            return None
+        
+        return result['file_path']
+    
+    def _simple_download(self, download_url: str) -> Optional[str]:
+        """简单下载（无GUI）"""
+        try:
+            filename = download_url.split('/')[-1]
+            if not filename or '?' in filename:
+                filename = "update.exe"
+            
+            file_path = os.path.join(tempfile.gettempdir(), filename)
+            
+            headers = {
+                'User-Agent': 'Tomato-Novel-Downloader',
+                'Accept': 'application/octet-stream'
+            }
+            
+            response = requests.get(download_url, headers=headers, timeout=60)
+            response.raise_for_status()
+            
+            with open(file_path, 'wb') as f:
+                f.write(response.content)
+            
+            return file_path
+        except Exception as e:
+            print(f"下载失败: {e}")
+            return None
+    
+    def replace_and_restart(self, downloaded_file_path: str) -> bool:
+        """
+        自动替换当前程序并重启
+        
+        Args:
+            downloaded_file_path: 下载的文件路径
+            
+        Returns:
+            是否成功启动替换流程
+        """
+        try:
+            current_exe = sys.executable
+            current_pid = os.getpid()
+            
+            if sys.platform == 'win32':
+                # Windows: 使用批处理脚本
+                helper_path = os.path.join(tempfile.gettempdir(), 'force_update_helper.bat')
+                
+                helper_script = f"""@echo off
+setlocal enabledelayedexpansion
+
+echo [ForceUpdate] 等待程序退出...
+taskkill /PID {current_pid} /F >nul 2>&1
+timeout /t 2 /nobreak > nul
+
+echo [ForceUpdate] 备份当前程序...
+if exist "{current_exe}" (
+    copy /y "{current_exe}" "{current_exe}.backup" >nul 2>&1
+)
+
+echo [ForceUpdate] 替换程序文件...
+set /a retry=0
+:replace_retry
+move /y "{downloaded_file_path}" "{current_exe}" >nul 2>&1
+if errorlevel 1 (
+    set /a retry+=1
+    if !retry! lss 5 (
+        echo [ForceUpdate] 替换失败，重试 !retry!/5
+        timeout /t 1 /nobreak > nul
+        goto replace_retry
+    ) else (
+        echo [ForceUpdate] 替换失败，恢复备份
+        if exist "{current_exe}.backup" (
+            move /y "{current_exe}.backup" "{current_exe}" >nul 2>&1
+        )
+        pause
+        exit /b 1
+    )
+)
+
+echo [ForceUpdate] 清理备份文件...
+if exist "{current_exe}.backup" (
+    del /f /q "{current_exe}.backup" >nul 2>&1
+)
+
+echo [ForceUpdate] 启动新版本程序...
+start "" "{current_exe}"
+
+echo [ForceUpdate] 更新完成
+timeout /t 2 /nobreak > nul
+del "%~f0"
+exit /b 0
+"""
+                
+                with open(helper_path, 'w', encoding='gbk') as f:
+                    f.write(helper_script)
+                
+                # 启动批处理脚本
+                DETACHED_PROCESS = 0x00000008
+                CREATE_NO_WINDOW = 0x08000000
+                subprocess.Popen(['cmd', '/c', helper_path], 
+                               creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW)
+                
+                # 退出当前程序
+                time.sleep(0.5)
+                sys.exit(0)
+                
+            else:
+                # Unix/Linux: 使用shell脚本
+                helper_path = os.path.join(tempfile.gettempdir(), 'force_update_helper.sh')
+                
+                helper_script = f"""#!/bin/bash
+echo "[ForceUpdate] 等待程序退出..."
+sleep 2
+
+echo "[ForceUpdate] 备份当前程序..."
+if [ -f "{current_exe}" ]; then
+    cp "{current_exe}" "{current_exe}.backup"
+fi
+
+echo "[ForceUpdate] 替换程序文件..."
+mv -f "{downloaded_file_path}" "{current_exe}"
+chmod +x "{current_exe}"
+
+echo "[ForceUpdate] 清理备份文件..."
+rm -f "{current_exe}.backup"
+
+echo "[ForceUpdate] 启动新版本程序..."
+nohup "{current_exe}" > /dev/null 2>&1 &
+
+echo "[ForceUpdate] 更新完成"
+rm -f "$0"
+"""
+                
+                with open(helper_path, 'w') as f:
+                    f.write(helper_script)
+                
+                os.chmod(helper_path, 0o755)
+                
+                # 启动shell脚本
+                subprocess.Popen(['/bin/bash', helper_path])
+                
+                # 退出当前程序
+                time.sleep(0.5)
+                sys.exit(0)
+            
+            return True
+            
+        except Exception as e:
+            print(f"启动替换流程失败: {e}")
+            return False
+    
+    def _start_force_update(self, update_info: Dict[str, Any]):
+        """
+        启动强制更新流程
+        
+        Args:
+            update_info: 更新信息
+        """
+        try:
+            latest_version = update_info.get('version', '未知')
+            assets = update_info.get('assets', [])
+            
+            if not assets:
+                print("没有可用的更新文件")
+                sys.exit(1)
+            
+            # 分离release和debug版本
+            release_asset = None
+            debug_asset = None
+            
+            for asset in assets:
+                name = asset.get('name', '').lower()
+                if sys.platform == 'win32' and name.endswith('.exe'):
+                    if 'debug' in name:
+                        debug_asset = asset
+                    else:
+                        release_asset = asset
+            
+            if not release_asset and not debug_asset:
+                print("没有找到适合当前平台的更新文件")
+                sys.exit(1)
+            
+            # 如果只有一个版本，直接下载
+            if release_asset and not debug_asset:
+                choice = 'release'
+                download_url = release_asset.get('download_url')
+            elif debug_asset and not release_asset:
+                choice = 'debug'
+                download_url = debug_asset.get('download_url
     def _get_platform_asset(self, assets: list, prefer_debug: bool = False) -> Optional[Dict[str, Any]]:
         """
         根据平台和版本类型选择合适的下载文件
@@ -318,6 +715,35 @@ class AutoUpdater:
                 except Exception:
                     continue
 
+')
+            else:
+                # 两个版本都有，让用户选择
+                release_url = release_asset.get('download_url')
+                debug_url = debug_asset.get('download_url')
+                choice = self.show_force_update_dialog(latest_version, release_url, debug_url)
+                
+                if not choice:
+                    # 用户没有选择（不应该发生，因为禁用了关闭按钮）
+                    print("未选择版本，程序将退出")
+                    sys.exit(1)
+                
+                download_url = release_url if choice == 'release' else debug_url
+            
+            # 下载更新
+            print(f"开始下载{choice}版本...")
+            downloaded_file = self.download_update_with_progress(download_url, choice)
+            
+            if not downloaded_file:
+                print("下载失败，程序将退出")
+                sys.exit(1)
+            
+            # 替换并重启
+            print("开始替换程序...")
+            self.replace_and_restart(downloaded_file)
+            
+        except Exception as e:
+            print(f"强制更新失败: {e}")
+            sys.exit(1)
         return None
     
     def download_update(self, update_info: Dict[str, Any], 

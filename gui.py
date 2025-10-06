@@ -94,9 +94,9 @@ class ModernNovelDownloaderGUI:
 
         # 启用更新系统
         self._check_last_update_status()
-        # 启动时自动检查更新
-        if self.official_build and self.config.get('auto_check_update', True):
-            self.root.after(5000, self.check_update_silent)
+        # 启动时强制检查更新（官方构建版）
+        if self.official_build:
+            self.root.after(100, self.check_update_force)
 
         # 禁用启动时的API测试，避免启动卡顿
         # self.root.after(1000, self._test_api_connection_at_startup)
@@ -3018,6 +3018,29 @@ API数量: {saved_api_count}个
         try:
             check_and_notify_update(self.updater, notify)
         except Exception as e:
+    
+    def check_update_force(self):
+        """启动时的强制更新检查"""
+        if not getattr(self, 'official_build', False):
+            return
+        
+        def worker():
+            try:
+                # 检查是否有新版本
+                update_info = self.updater.checker.get_update_info() if self.updater.checker.has_update(force=True) else None
+                
+                if update_info:
+                    # 发现新版本，启动强制更新流程
+                    self.root.after(0, lambda: self.updater._start_force_update(update_info))
+                else:
+                    # 没有新版本，正常启动
+                    print("当前已是最新版本")
+                    
+            except Exception as e:
+                # 检查更新失败，继续启动程序
+                print(f"强制更新检查失败: {e}")
+        
+        threading.Thread(target=worker, daemon=True).start()
             print(f"静默检查更新失败: {e}")
 
     def check_update_now(self):

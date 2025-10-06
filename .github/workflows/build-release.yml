@@ -97,23 +97,17 @@ jobs:
           echo "Using build time: $BUILD_TIME"
           
           # 完全重写version.py文件，确保__build_channel__正确设置
-          cat > version.py << 'EOF'
-# -*- coding: utf-8 -*-
-"""
-版本信息文件 - GitHub Actions自动生成
-"""
-
-__version__ = "VERSION_PLACEHOLDER"
-__author__ = "Tomato Novel Downloader"
-__description__ = "A modern novel downloader with GitHub auto-update support"
-__github_repo__ = "POf-L/Fanqie-novel-Downloader"
-__build_time__ = "BUILD_TIME_PLACEHOLDER"
-__build_channel__ = "github-actions"
-EOF
-          
-          # 替换占位符
-          sed -i "s/VERSION_PLACEHOLDER/$VERSION/" version.py
-          sed -i "s/BUILD_TIME_PLACEHOLDER/$BUILD_TIME/" version.py
+          echo "# -*- coding: utf-8 -*-" > version.py
+          echo '"""' >> version.py
+          echo "版本信息文件 - GitHub Actions自动生成" >> version.py
+          echo '"""' >> version.py
+          echo "" >> version.py
+          echo "__version__ = \"$VERSION\"" >> version.py
+          echo "__author__ = \"Tomato Novel Downloader\"" >> version.py
+          echo "__description__ = \"A modern novel downloader with GitHub auto-update support\"" >> version.py
+          echo "__github_repo__ = \"POf-L/Fanqie-novel-Downloader\"" >> version.py
+          echo "__build_time__ = \"$BUILD_TIME\"" >> version.py
+          echo "__build_channel__ = \"github-actions\"" >> version.py
           
           echo "✅ 更新后的version.py:"
           cat version.py

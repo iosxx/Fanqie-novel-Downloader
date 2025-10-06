@@ -170,6 +170,14 @@ def get_hidden_imports():
     # 添加隐式依赖
     hidden_imports.extend(IMPLICIT_DEPENDENCIES)
     
+    # 加入本地模块（PyInstaller 有时不会解析到函数/方法内的导入）
+    # 确保自动更新与版本信息模块被正确打包
+    hidden_imports.extend([
+        'updater',
+        'external_updater',
+        'version',
+    ])
+
     # 去重并排序
     hidden_imports = sorted(set(hidden_imports))
     

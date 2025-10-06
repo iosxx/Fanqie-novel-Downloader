@@ -1011,8 +1011,7 @@ def Run(book_id, save_path, file_format='txt', start_chapter=None, end_chapter=N
             def download_task(chapter):
                 nonlocal success_count
                 try:
-                    fresh_headers = get_headers()
-                    title, content = down_text(chapter["id"], fresh_headers, book_id)
+                    title, content = down_text(chapter["id"], common_headers, book_id)
                     if content:
                         with lock:
                             chapter_results[chapter["index"]] = {
@@ -1032,6 +1031,9 @@ def Run(book_id, save_path, file_format='txt', start_chapter=None, end_chapter=N
                     with lock:
                         failed_chapters.append(chapter)
                     return False
+
+            # 仅生成一次请求头，避免每章产生UA与随机数开销
+            common_headers = get_headers()
 
             attempt = 1
             while todo_chapters and attempt <= CONFIG["max_retries"]:

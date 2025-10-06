@@ -101,9 +101,13 @@ class ModernNovelDownloaderGUI:
 
         # 启用更新系统
         self._check_last_update_status()
-        # 启动时强制检查更新（官方构建版）
-        if self.official_build:
-            self.root.after(100, self.check_update_force)
+        # 启动时自动检查更新（仅官方打包版），受配置项 auto_check_update 控制
+        try:
+            auto_check = bool(self.config.get('auto_check_update', True))
+        except Exception:
+            auto_check = True
+        if self.official_build and auto_check:
+            self.root.after(800, self.check_update_force)
 
         # 禁用启动时的API测试，避免启动卡顿
         # self.root.after(1000, self._test_api_connection_at_startup)

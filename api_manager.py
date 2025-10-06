@@ -5,6 +5,9 @@ API管理模块 - 使用新的API接口
 """
 
 import requests
+import threading
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import json
 from typing import Dict, List, Optional
 from config import CONFIG, print_lock, get_headers
@@ -16,6 +19,26 @@ class APIManager:
         self.base_url = CONFIG["api_base_url"]
         self.api_endpoint = CONFIG["api_endpoint"]
         self.full_url = f"{self.base_url}{self.api_endpoint}"
+        # 线程本地会话，复用连接，减少握手
+        self._tls = threading.local()
+
+    def _get_session(self) -> requests.Session:
+        sess = getattr(self._tls, 'session', None)
+        if sess is None:
+            sess = requests.Session()
+            retries = Retry(
+                total=3,
+                backoff_factor=0.4,
+                status_forcelist=(429, 500, 502, 503, 504),
+                allowed_methods=("GET", "POST"),
+                raise_on_status=False,
+            )
+            pool_size = max(8, int(CONFIG.get("max_workers", 8)))
+            adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=retries)
+            sess.mount('http://', adapter)
+            sess.mount('https://', adapter)
+            self._tls.session = sess
+        return sess
     
     def search_books(self, keyword: str) -> Optional[Dict]:
         """搜索书籍
@@ -26,7 +49,7 @@ class APIManager:
         """
         try:
             params = {"q": keyword}
-            response = requests.get(self.full_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            response = self._get_session().get(self.full_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
             
             if response.status_code == 200:
                 data = response.json()
@@ -251,7 +274,7 @@ class APIManager:
         try:
             # 测试健康检查接口
             health_url = f"{self.base_url}/health"
-            response = requests.get(health_url, timeout=5)
+            response = self._get_session().get(health_url, timeout=5)
             
             if response.status_code == 200:
                 data = response.json()
@@ -261,7 +284,7 @@ class APIManager:
             
             # 如果健康检查失败，尝试获取服务信息
             info_url = self.base_url + "/"
-            response = requests.get(info_url, timeout=5)
+            response = self._get_session().get(info_url, timeout=5)
             
             if response.status_code == 200:
                 data = response.json()

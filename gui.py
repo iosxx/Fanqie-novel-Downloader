@@ -16,6 +16,7 @@ from version import __version__, __github_repo__
 import sys
 import platform
 import tempfile
+import shutil
 
 # 添加HEIC支持
 try:
@@ -3183,13 +3184,29 @@ API数量: {saved_api_count}个
             import json
             import subprocess
 
-            # 获取外部脚本路径
+            # 解析脚本来源目录（优先 PyInstaller 解包目录）
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            external_script = os.path.join(script_dir, 'external_updater.py')
+            bundle_dir = getattr(sys, '_MEIPASS', script_dir)
+            external_src = os.path.join(bundle_dir, 'external_updater.py')
+            if not os.path.exists(external_src):
+                # 兼容性回退：尝试从可执行文件同目录查找
+                try:
+                    exe_dir = os.path.dirname(sys.executable)
+                except Exception:
+                    exe_dir = script_dir
+                external_src = os.path.join(exe_dir, 'external_updater.py')
 
-            # 检查外部脚本是否存在
-            if not os.path.exists(external_script):
-                raise Exception(f"外部更新脚本不存在: {external_script}")
+            # 最终校验
+            if not os.path.exists(external_src):
+                raise Exception(f"外部更新脚本不存在: {external_src}")
+
+            # 将更新器脚本复制到系统临时目录运行，避免路径/权限问题
+            temp_dir = tempfile.gettempdir()
+            external_script = os.path.join(temp_dir, 'external_updater.py')
+            try:
+                shutil.copy2(external_src, external_script)
+            except Exception as copy_err:
+                raise Exception(f"复制更新脚本失败: {copy_err}")
 
             # 将更新信息序列化为 JSON 字符串
             update_info_json = json.dumps(update_info)
@@ -3199,8 +3216,17 @@ API数量: {saved_api_count}个
                 # Windows 批处理脚本
                 escaped_json = update_info_json.replace('"', '\\"')
                 batch_script = f"""@echo off
-cd /d "{script_dir}"
-python "{external_script}" "{escaped_json}"
+setlocal
+cd /d "{temp_dir}"
+set "PYCMD="
+where python >nul 2>&1 && set "PYCMD=python"
+if not defined PYCMD where py >nul 2>&1 && set "PYCMD=py -3"
+if not defined PYCMD where python3 >nul 2>&1 && set "PYCMD=python3"
+if not defined PYCMD (
+  echo [Updater] 未找到可用的 Python 解释器
+  exit /b 1
+)
+%PYCMD% "{external_script}" "{escaped_json}"
 """
                 batch_file = os.path.join(tempfile.gettempdir(), 'start_update.bat')
                 with open(batch_file, 'w', encoding='gbk') as f:
@@ -3212,7 +3238,8 @@ python "{external_script}" "{escaped_json}"
             else:
                 # Unix shell 脚本
                 shell_script = f"""#!/bin/bash
-cd "{script_dir}"
+set -euo pipefail
+cd "{temp_dir}"
 python3 "{external_script}" '{update_info_json}'
 """
                 shell_file = os.path.join(tempfile.gettempdir(), 'start_update.sh')

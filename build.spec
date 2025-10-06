@@ -21,7 +21,7 @@ a = Analysis(
     datas=[
         # ('version.py', '.'),  # Removed version.py file
     ] + fake_useragent_datas,
-    hiddenimports=get_hidden_imports(),  # 自动从 requirements.txt 读取依赖
+    hiddenimports=(get_hidden_imports() + ['updater', 'external_updater', 'version']),  # 自动从 requirements.txt 读取依赖，并强制包含本地更新模块
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

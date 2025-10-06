@@ -30,11 +30,11 @@ requests.packages.urllib3.disable_warnings()
 
 # 全局配置
 CONFIG = {
-    "max_workers": 7,
+    "max_workers": 30,
     "max_retries": 3,
     "request_timeout": 30,
     "status_file": "chapter.json",
-    "request_rate_limit": 0.7,
+    "request_rate_limit": 0.1,
     "api_base_url": "https://api-return.cflin.ddns-ip.net",  # 新API基础URL
     "api_endpoint": "/api/xiaoshuo/fanqie",  # 新API端点
     "download_enabled": True,  # 启用章节下载功能

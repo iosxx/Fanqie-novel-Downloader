@@ -67,8 +67,23 @@ jobs:
         run: |
           # 注入构建元信息，标记为官方GitHub Actions构建
           if [ -f version.py ]; then
-            grep -q '__build_channel__' version.py || echo '__build_channel__ = "github-actions"' >> version.py
-            grep -q '__build_time__' version.py || echo "__build_time__ = '$(date -u +'%Y-%m-%d %H:%M:%S UTC')'" >> version.py
+            # 使用sed替换现有的__build_channel__，如果不存在则追加
+            if grep -q '__build_channel__' version.py; then
+              sed -i.bak 's/__build_channel__\s*=\s*".*"/__build_channel__ = "github-actions"/' version.py
+            else
+              echo '__build_channel__ = "github-actions"' >> version.py
+            fi
+            # 使用sed替换现有的__build_time__，如果不存在则追加
+            BUILD_TIME="$(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            if grep -q '__build_time__' version.py; then
+              sed -i.bak "s/__build_time__\s*=\s*\".*\"/__build_time__ = \"$BUILD_TIME\"/" version.py
+            else
+              echo "__build_time__ = \"$BUILD_TIME\"" >> version.py
+            fi
+            # 清理备份文件
+            rm -f version.py.bak
+            echo "Updated version.py:"
+            cat version.py
           fi
           python build_app.py
 

@@ -101,7 +101,17 @@ def build_executable(variant="release", executable_name=None):
             "PIL.BmpImagePlugin",
             "PIL.WebPImagePlugin",
             "PIL._imaging",
-            "pillow_heif"
+            "pillow_heif",
+            # 升级功能必需的依赖
+            "packaging",
+            "packaging.version",
+            "packaging.specifiers",
+            "packaging.requirements",
+            "tempfile",
+            "zipfile",
+            "shutil",
+            "subprocess",
+            "datetime"
         ]
         
         for import_name in hidden_imports:

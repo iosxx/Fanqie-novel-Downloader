@@ -65,7 +65,17 @@ a = Analysis(
         'typing',
         'signal',
         'random',
-        'io'
+        'io',
+        # 升级功能必需的依赖
+        'packaging',
+        'packaging.version',
+        'packaging.specifiers',
+        'packaging.requirements',
+        'tempfile',
+        'zipfile',
+        'shutil',
+        'subprocess',
+        'datetime'
     ],
     hookspath=[],
     hooksconfig={},

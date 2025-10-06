@@ -258,28 +258,43 @@ class AutoUpdater:
         """
         return self.checker.get_update_info() if self.checker.has_update(force) else None
     
-    def _get_platform_asset(self, assets: list) -> Optional[Dict[str, Any]]:
+    def _get_platform_asset(self, assets: list, prefer_debug: bool = False) -> Optional[Dict[str, Any]]:
         """
-        根据平台选择合适的下载文件
+        根据平台和版本类型选择合适的下载文件
         
         Args:
-            assets: 资源列表
+            assets: GitHub Release的资源列表
+            prefer_debug: 是否优先选择debug版本
             
         Returns:
-            合适的资源信息
+            匹配的资源字典,如果没有找到则返回None
         """
+        if not assets:
+            return None
+        
         platform = sys.platform.lower()
+        
+        # 根据偏好过滤debug或release版本
+        if prefer_debug:
+            filtered_assets = [a for a in assets if 'debug' in a['name'].lower()]
+        else:
+            filtered_assets = [a for a in assets if 'debug' not in a['name'].lower()]
+        
+        # 如果过滤后没有资源,使用所有资源
+        if not filtered_assets:
+            filtered_assets = assets
 
         # 根据平台定义优先级检查函数
         if platform == 'win32':
             predicates = [
-                lambda n: n.endswith('.exe') and ('win' in n or 'windows' in n),
-                lambda n: ('win' in n or 'windows' in n) and n.endswith('.zip'),
+                lambda n: n.endswith('.exe') and any(k in n for k in ['win', 'windows', 'x64', 'amd64']),
+                lambda n: n.endswith('.exe'),  # 任何exe作为备选
+                lambda n: any(k in n for k in ['win', 'windows']) and n.endswith('.zip'),
                 lambda n: n.endswith('.zip')
             ]
         elif platform.startswith('linux'):
             predicates = [
-                lambda n: n.endswith(('.appimage', '.appimage')),  # AppImage优先
+                lambda n: n.endswith(('.AppImage', '.appimage')),  # AppImage优先(支持大小写)
                 lambda n: ('linux' in n) and (n.endswith('.tar.gz') or n.endswith('.tgz')),
                 lambda n: ('linux' in n) and n.endswith('.zip'),
                 lambda n: (n.endswith('.tar.gz') or n.endswith('.tgz')),
@@ -287,14 +302,14 @@ class AutoUpdater:
             ]
         elif platform == 'darwin':
             predicates = [
-                lambda n: n.endswith('.dmg'),
-                lambda n: ('mac' in n or 'darwin' in n) and n.endswith('.zip'),
-                lambda n: n.endswith('.zip')
+                lambda n: n.lower().endswith('.dmg'),
+                lambda n: ('mac' in n or 'darwin' in n) and n.lower().endswith('.zip'),
+                lambda n: n.lower().endswith('.zip')
             ]
         else:
             predicates = [lambda n: n.endswith('.zip')]
 
-        assets_by_name = [(asset, asset['name'].lower()) for asset in assets]
+        assets_by_name = [(asset, asset['name'].lower()) for asset in filtered_assets]
         for pred in predicates:
             for asset, lower_name in assets_by_name:
                 try:

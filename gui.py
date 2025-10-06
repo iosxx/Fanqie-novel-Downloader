@@ -92,11 +92,11 @@ class ModernNovelDownloaderGUI:
         # 检查已有的验证状态
         self.check_existing_verification()
 
-        # 禁用更新系统
-        # self._check_last_update_status()
-        # 禁用启动时自动检查更新
-        # if self.official_build and self.config.get('auto_check_update', True):
-        #     self.root.after(5000, self.check_update_silent)
+        # 启用更新系统
+        self._check_last_update_status()
+        # 启动时自动检查更新
+        if self.official_build and self.config.get('auto_check_update', True):
+            self.root.after(5000, self.check_update_silent)
 
         # 禁用启动时的API测试，避免启动卡顿
         # self.root.after(1000, self._test_api_connection_at_startup)

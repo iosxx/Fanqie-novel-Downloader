@@ -37,32 +37,6 @@ requests.packages.urllib3.disable_warnings()
 # 移除fetch_api_endpoints_from_server函数，改为使用新API
 
 
-def extract_chapters(soup):
-    """解析章节列表"""
-    chapters = []
-    for idx, item in enumerate(soup.select('div.chapter-item')):
-        a_tag = item.find('a')
-        if not a_tag:
-            continue
-
-        raw_title = a_tag.get_text(strip=True)
-
-        # 按参考代码格式化标题：保留番外/特别篇/if线，其余规范为“第N章 标题”
-        if re.match(r'^(番外|特别篇|if线)\s*', raw_title):
-            final_title = raw_title
-        else:
-            clean_title = re.sub(r'^第[一二三四五六七八九十百千\d]+章\s*', '', raw_title).strip()
-            final_title = f"第{idx+1}章 {clean_title}"
-
-        chapters.append({
-            "id": a_tag['href'].split('/')[-1],
-            "title": final_title,
-            "url": f"https://fanqienovel.com{a_tag['href']}",
-            "index": idx
-        })
-    return chapters
-
-
 # 批量下载功能已移除，使用新API的单章节下载
 
 

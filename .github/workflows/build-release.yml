@@ -16,6 +16,9 @@ jobs:
   # 生成版本号的job
   version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+      build_time: ${{ steps.version.outputs.BUILD_TIME }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,7 +38,7 @@ jobs:
   build:
     needs: version
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
 
@@ -125,20 +128,17 @@ jobs:
         shell: bash
 
       - name: Install dependencies
-        if: github.event_name != 'push' || matrix.variant == 'release'
         run: |
           python -m pip install --prefer-binary -r requirements.txt
           python -m pip install --prefer-binary pyinstaller
         shell: bash
 
       - name: Build application (${{ matrix.variant }})
-        if: github.event_name != 'push' || matrix.variant == 'release'
         run: |
           python build_app.py --variant=${{ matrix.variant }} --name=${{ matrix.executable }}
         shell: bash
 
       - name: Verify build
-        if: github.event_name != 'push' || matrix.variant == 'release'
         run: |
           ls -la dist/
           target="dist/${{ matrix.executable }}${{ matrix.ext }}"
@@ -152,7 +152,6 @@ jobs:
         shell: bash
 
       - name: Upload artifact
-        if: github.event_name != 'push' || matrix.variant == 'release'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}

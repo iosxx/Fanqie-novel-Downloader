@@ -21,7 +21,7 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-13]
     runs-on: ${{ matrix.os }}
@@ -66,6 +66,7 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
               out.write(f'version={ver}\n')
           PY
+        shell: bash
 
       - name: Build executable
         run: |
@@ -90,6 +91,7 @@ jobs:
             cat version.py
           fi
           python build_app.py
+        shell: bash
 
       - name: Rename and zip artifact (Windows)
         if: runner.os == 'Windows'

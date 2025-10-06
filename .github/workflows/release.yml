@@ -5,7 +5,6 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
       tag:
         description: 'Release tag (e.g. v1.2.3). If provided, a release will be created/updated.'
         required: false
@@ -14,34 +13,18 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build (${{ matrix.os }})
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: [windows-latest, ubuntu-latest, macos-13]
     runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      - name: Compute version from tag and sync version.py
-        id: version
-        env:
-          TAG_INPUT: ${{ github.event.inputs.tag }}
-        run: |
           python - << 'PY'
           import os, re
           tag_input = os.environ.get('TAG_INPUT', '')

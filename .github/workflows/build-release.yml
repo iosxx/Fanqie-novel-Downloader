@@ -8,14 +8,20 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # 生成版本号的job
   version:
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.VERSION }}
-      build_time: ${{ steps.version.outputs.BUILD_TIME }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Generate version
         id: version
         run: |
@@ -29,9 +35,10 @@ jobs:
   build:
     needs: version
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
+
           # Windows 构建
           - os: windows-latest
             variant: release
@@ -72,11 +79,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -114,18 +125,20 @@ jobs:
         shell: bash
 
       - name: Install dependencies
+        if: github.event_name != 'push' || matrix.variant == 'release'
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          python -m pip install --prefer-binary -r requirements.txt
+          python -m pip install --prefer-binary pyinstaller
         shell: bash
 
       - name: Build application (${{ matrix.variant }})
+        if: github.event_name != 'push' || matrix.variant == 'release'
         run: |
           python build_app.py --variant=${{ matrix.variant }} --name=${{ matrix.executable }}
         shell: bash
 
       - name: Verify build
+        if: github.event_name != 'push' || matrix.variant == 'release'
         run: |
           ls -la dist/
           target="dist/${{ matrix.executable }}${{ matrix.ext }}"
@@ -139,6 +152,7 @@ jobs:
         shell: bash
 
       - name: Upload artifact
+        if: github.event_name != 'push' || matrix.variant == 'release'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}

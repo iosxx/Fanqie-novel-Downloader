@@ -12,6 +12,7 @@ import sys
 import os
 import shutil
 import argparse
+from build_config import get_hidden_imports
 
 # 导入编码工具（如果存在）
 try:
@@ -78,41 +79,8 @@ def build_executable(variant="release", executable_name=None):
         else:
             cmd.append("--windowed")
         
-        # 添加隐藏导入
-        hidden_imports = [
-            "bs4",
-            "beautifulsoup4",
-            "fake_useragent",
-            "fake_useragent.data",
-            "tqdm",
-            "requests",
-            "urllib3",
-            "ebooklib",
-            "PIL",
-            "PIL.Image",
-            "PIL.ImageTk",
-            "PIL.ImageDraw",
-            "PIL.ImageFile",
-            "PIL.ImageFont",
-            "PIL.ImageOps",
-            "PIL.JpegImagePlugin",
-            "PIL.PngImagePlugin",
-            "PIL.GifImagePlugin",
-            "PIL.BmpImagePlugin",
-            "PIL.WebPImagePlugin",
-            "PIL._imaging",
-            "pillow_heif",
-            # 升级功能必需的依赖
-            "packaging",
-            "packaging.version",
-            "packaging.specifiers",
-            "packaging.requirements",
-            "tempfile",
-            "zipfile",
-            "shutil",
-            "subprocess",
-            "datetime"
-        ]
+        # 添加隐藏导入（自动从 requirements.txt 读取）
+        hidden_imports = get_hidden_imports()
         
         for import_name in hidden_imports:
             cmd.extend(["--hidden-import", import_name])

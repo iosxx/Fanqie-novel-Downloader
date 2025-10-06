@@ -3,6 +3,7 @@
 import os
 import sys
 from PyInstaller.utils.hooks import collect_data_files
+from build_config import get_hidden_imports
 sys.setrecursionlimit(sys.getrecursionlimit() * 5)
 
 block_cipher = None
@@ -20,63 +21,7 @@ a = Analysis(
     datas=[
         # ('version.py', '.'),  # Removed version.py file
     ] + fake_useragent_datas,
-    hiddenimports=[
-        'bs4',
-        'fake_useragent',
-        'fake_useragent.data',
-        'tqdm',
-        'requests',
-        'urllib3',
-        'ebooklib',
-        'PIL',
-        'PIL.Image',
-        'PIL.ImageTk',
-        'PIL.ImageDraw',
-        'PIL.ImageFile',
-        'PIL.ImageFont',
-        'PIL.ImageOps',
-        'PIL.JpegImagePlugin',
-        'PIL.PngImagePlugin',
-        'PIL.GifImagePlugin',
-        'PIL.BmpImagePlugin',
-        'PIL.WebPImagePlugin',
-        'PIL._imaging',
-        'pillow_heif',
-        'pillow_heif.heif',
-        'pillow_heif.misc',
-        'pillow_heif.options',
-        'tkinter',
-        'tkinter.ttk',
-        'tkinter.messagebox',
-        'tkinter.filedialog',
-        'tkinter.font',
-        'tkinter.scrolledtext',
-        'threading',
-        'json',
-        'os',
-        'sys',
-        'time',
-        're',
-        'base64',
-        'gzip',
-        'urllib.parse',
-        'concurrent.futures',
-        'collections',
-        'typing',
-        'signal',
-        'random',
-        'io',
-        # 升级功能必需的依赖
-        'packaging',
-        'packaging.version',
-        'packaging.specifiers',
-        'packaging.requirements',
-        'tempfile',
-        'zipfile',
-        'shutil',
-        'subprocess',
-        'datetime'
-    ],
+    hiddenimports=get_hidden_imports(),  # 自动从 requirements.txt 读取依赖
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

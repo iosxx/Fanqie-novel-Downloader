@@ -12,8 +12,6 @@ from novel_downloader import NovelDownloaderAPI
 from api_manager import api_manager
 import novel_downloader
 from ebooklib import epub
-from updater import AutoUpdater, get_current_version, check_and_notify_update
-from updater import is_official_release_build
 from version import __version__, __github_repo__
 import sys
 import platform
@@ -65,9 +63,17 @@ class ModernNovelDownloaderGUI:
         
         # 初始化版本信息和自动更新
         self.current_version = __version__
-        self.updater = AutoUpdater(__github_repo__, self.current_version)
-        self.updater.register_callback(self.on_update_event)
-        self.official_build = is_official_release_build()
+        
+        # 尝试导入 updater 模块（可选）
+        try:
+            from updater import AutoUpdater, is_official_release_build
+            self.updater = AutoUpdater(__github_repo__, self.current_version)
+            self.updater.register_callback(self.on_update_event)
+            self.official_build = is_official_release_build()
+        except ImportError as e:
+            print(f"updater 模块不可用: {e}")
+            self.updater = None
+            self.official_build = False
 
         # 清理可能残留的更新备份文件
         self._cleanup_update_backups()
@@ -304,8 +310,14 @@ class ModernNovelDownloaderGUI:
         check_update_btn.pack(side=tk.RIGHT, padx=5)
         
         # 版本信息标签
+        try:
+            from updater import get_current_version
+            version_text = f"版本: {get_current_version()}"
+        except ImportError:
+            version_text = f"版本: {self.current_version}"
+        
         version_label = tk.Label(toolbar_frame,
-                                text=f"版本: {self.current_version}",
+                                text=version_text,
                                 font=self.fonts['small'],
                                 bg=self.colors['surface'],
                                 fg=self.colors['text_secondary'])
@@ -3034,6 +3046,13 @@ API数量: {saved_api_count}个
         """在后台静默检查更新"""
         if not getattr(self, 'official_build', False):
             return
+        
+        try:
+            from updater import check_and_notify_update
+        except ImportError:
+            print("updater 模块不可用，跳过静默更新检查")
+            return
+        
         def notify(update_info):
             if not update_info:
                 return
@@ -3069,6 +3088,16 @@ API数量: {saved_api_count}个
     def manual_check_update(self):
         """手动检查更新（新方法，统一入口）"""
         try:
+            # 检查 updater 模块是否可用
+            try:
+                from updater import check_and_notify_update, is_official_release_build
+            except ImportError as e:
+                messagebox.showerror("功能不可用",
+                    "更新功能需要安装依赖库：\n\n"
+                    "pip install requests packaging\n\n"
+                    f"详细错误：{str(e)}")
+                return
+            
             # 对于非官方构建，直接跳转到发布页
             if not getattr(self, 'official_build', False):
                 releases_url = f"https://github.com/{__github_repo__}/releases/latest"
@@ -3251,6 +3280,11 @@ python3 "{external_script}" '{update_info_json}'
         """检查上次更新的状态"""
         try:
             from updater import AutoUpdater
+        except ImportError:
+            print("updater 模块不可用，跳过更新状态检查")
+            return
+        
+        try:
             status = AutoUpdater.check_update_status()
 
             if status['log_exists']:

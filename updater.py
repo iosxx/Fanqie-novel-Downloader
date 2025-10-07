@@ -13,6 +13,7 @@ import zipfile
 import tempfile
 import threading
 import subprocess
+import importlib
 from typing import Optional, Dict, Any, Callable
 from datetime import datetime, timedelta
 
@@ -27,17 +28,16 @@ except Exception:
 
 
 def is_official_release_build() -> bool:
-	"""检测是否为GitHub Actions发布版构建（且为打包运行）。"""
-	try:
-		channel = getattr(app_meta, "__build_channel__", "source") if app_meta else "source"
-		if channel != "github-actions":
-			return False
-		# 仅在PyInstaller打包环境启用
-		if not getattr(sys, "frozen", False):
-			return False
-		return True
-	except Exception:
-		return False
+    """检测是否为GitHub Actions发布版构建（且为打包运行）。"""
+    # 修改：允许所有打包版本进行更新
+    try:
+        # 只要是PyInstaller打包环境就允许更新
+        if getattr(sys, "frozen", False):
+            return True
+        # 源码运行环境也允许更新（开发调试用）
+        return True
+    except Exception:
+        return False
 
 
 class UpdateChecker:
@@ -515,39 +515,77 @@ class AutoUpdater:
                 
                 helper_script = f"""@echo off
 setlocal enabledelayedexpansion
+chcp 65001 >nul 2>&1
 
 echo [ForceUpdate] 等待程序退出...
 taskkill /PID {current_pid} /F >nul 2>&1
-timeout /t 2 /nobreak > nul
 
+REM 等待进程完全退出
+set /a wait_count=0
+:wait_exit
+tasklist /FI "PID eq {current_pid}" 2>nul | find "{current_pid}" >nul
+if errorlevel 1 goto do_update
+set /a wait_count+=1
+if !wait_count! geq 10 (
+    echo [ForceUpdate] 强制继续更新
+    goto do_update
+)
+timeout /t 1 /nobreak > nul
+goto wait_exit
+
+:do_update
 echo [ForceUpdate] 备份当前程序...
 if exist "{current_exe}" (
     copy /y "{current_exe}" "{current_exe}.backup" >nul 2>&1
+    if errorlevel 1 (
+        echo [ForceUpdate] 备份失败，尝试使用临时目录
+        copy /y "{current_exe}" "%TEMP%\program_backup.exe" >nul 2>&1
+    )
 )
 
 echo [ForceUpdate] 替换程序文件...
 set /a retry=0
 :replace_retry
+
+REM 先尝试直接移动
 move /y "{downloaded_file_path}" "{current_exe}" >nul 2>&1
-if errorlevel 1 (
-    set /a retry+=1
-    if !retry! lss 5 (
-        echo [ForceUpdate] 替换失败，重试 !retry!/5
-        timeout /t 1 /nobreak > nul
-        goto replace_retry
-    ) else (
-        echo [ForceUpdate] 替换失败，恢复备份
-        if exist "{current_exe}.backup" (
-            move /y "{current_exe}.backup" "{current_exe}" >nul 2>&1
-        )
-        pause
-        exit /b 1
-    )
+if not errorlevel 1 goto replace_success
+
+REM 如果失败，尝试先删除再复制
+del /f /q "{current_exe}" >nul 2>&1
+copy /y "{downloaded_file_path}" "{current_exe}" >nul 2>&1
+if not errorlevel 1 (
+    del /f /q "{downloaded_file_path}" >nul 2>&1
+    goto replace_success
 )
+
+REM 重试机制
+set /a retry+=1
+if !retry! lss 10 (
+    echo [ForceUpdate] 替换失败，重试 !retry!/10
+    timeout /t 2 /nobreak > nul
+    goto replace_retry
+) else (
+    echo [ForceUpdate] 替换失败，恢复备份
+    if exist "{current_exe}.backup" (
+        move /y "{current_exe}.backup" "{current_exe}" >nul 2>&1
+    ) else if exist "%TEMP%\program_backup.exe" (
+        copy /y "%TEMP%\program_backup.exe" "{current_exe}" >nul 2>&1
+    )
+    echo [ForceUpdate] 更新失败！按任意键退出...
+    pause >nul
+    exit /b 1
+)
+
+:replace_success
+echo [ForceUpdate] 文件替换成功
 
 echo [ForceUpdate] 清理备份文件...
 if exist "{current_exe}.backup" (
     del /f /q "{current_exe}.backup" >nul 2>&1
+)
+if exist "%TEMP%\program_backup.exe" (
+    del /f /q "%TEMP%\program_backup.exe" >nul 2>&1
 )
 
 echo [ForceUpdate] 启动新版本程序...
@@ -555,7 +593,9 @@ start "" "{current_exe}"
 
 echo [ForceUpdate] 更新完成
 timeout /t 2 /nobreak > nul
-del "%~f0"
+
+REM 清理自身
+(goto) 2>nul & del "%~f0"
 exit /b 0
 """
                 
@@ -833,10 +873,10 @@ rm -f "$0"
         Returns:
             是否安装成功
         """
-        # 仅允许官方发布版自动更新
-        if self.official_build_only and not is_official_release_build():
-            self._notify_callbacks('install_error', '当前为源码或非官方构建，已禁用自动更新')
-            return False
+        # 移除官方构建限制，允许所有版本自动更新
+        # if self.official_build_only and not is_official_release_build():
+        #     self._notify_callbacks('install_error', '当前为源码或非官方构建，已禁用自动更新')
+        #     return False
         try:
             self._notify_callbacks('install_start', update_file)
             self._create_update_log(f"开始安装更新: {update_file}")
@@ -898,6 +938,7 @@ rm -f "$0"
         helper_script = f"""
 @echo off
 setlocal enabledelayedexpansion
+chcp 65001 >nul 2>&1
 
 REM 参数：当前PID、当前EXE路径、下载的更新文件路径、是否重启(True/False)
 set target_pid={current_pid}
@@ -907,15 +948,14 @@ set do_restart={str(restart)}
 
 echo [Updater] 准备关闭进程 !target_pid! 并执行文件替换
 taskkill /PID !target_pid! /F >nul 2>&1
-timeout /t 2 /nobreak > nul
 
-REM 等待退出，最多15次
+REM 等待退出，增强的等待机制
 set /a count=0
 :wait_exit
 tasklist /FI "PID eq !target_pid!" 2>nul | find "!target_pid!" >nul
 if errorlevel 1 goto do_update
 set /a count+=1
-if !count! geq 15 (
+if !count! geq 20 (
     echo [Updater] 进程未退出，继续强制更新
     goto do_update
 )
@@ -924,29 +964,62 @@ goto wait_exit
 
 :do_update
 echo [Updater] 开始更新文件
-REM 备份旧文件
-if exist !current_exe! (
-    copy /y !current_exe! !current_exe!.backup >nul 2>&1
-)
 
-REM 替换新文件（带重试）
-set /a retry=0
-:replace_retry
-move /y !update_file! !current_exe! >nul 2>&1
-if errorlevel 1 (
-    set /a retry+=1
-    if !retry! lss 5 (
-        echo [Updater] 替换失败，重试 !retry!/5
-        timeout /t 1 /nobreak > nul
-        goto replace_retry
-    ) else (
-        echo [Updater] 替换失败，尝试恢复备份
-        if exist !current_exe!.backup (
-            move /y !current_exe!.backup !current_exe! >nul 2>&1
-        )
-        goto end
+REM 备份旧文件（多重备份策略）
+if exist !current_exe! (
+    echo [Updater] 创建备份...
+    copy /y !current_exe! !current_exe!.backup >nul 2>&1
+    if errorlevel 1 (
+        echo [Updater] 主备份失败，使用临时目录备份
+        copy /y !current_exe! "%TEMP%\updater_backup.exe" >nul 2>&1
     )
 )
+
+REM 替换新文件（改进的替换策略）
+set /a retry=0
+:replace_retry
+echo [Updater] 尝试替换文件...
+
+REM 策略1：直接移动
+move /y !update_file! !current_exe! >nul 2>&1
+if not errorlevel 1 goto replace_success
+
+REM 策略2：删除后复制
+echo [Updater] 使用删除-复制策略...
+del /f /q !current_exe! >nul 2>&1
+timeout /t 1 /nobreak > nul
+copy /y !update_file! !current_exe! >nul 2>&1
+if not errorlevel 1 (
+    del /f /q !update_file! >nul 2>&1
+    goto replace_success
+)
+
+REM 策略3：使用 xcopy
+echo [Updater] 使用 xcopy 策略...
+xcopy /y /h /r !update_file! !current_exe!* >nul 2>&1
+if not errorlevel 1 (
+    del /f /q !update_file! >nul 2>&1
+    goto replace_success
+)
+
+REM 重试
+set /a retry+=1
+if !retry! lss 10 (
+    echo [Updater] 替换失败，重试 !retry!/10
+    timeout /t 2 /nobreak > nul
+    goto replace_retry
+) else (
+    echo [Updater] 替换失败，尝试恢复备份
+    if exist !current_exe!.backup (
+        move /y !current_exe!.backup !current_exe! >nul 2>&1
+    ) else if exist "%TEMP%\updater_backup.exe" (
+        copy /y "%TEMP%\updater_backup.exe" !current_exe! >nul 2>&1
+    )
+    echo [Updater] 更新失败！
+    goto end
+)
+
+:replace_success
 
 REM 清理备份
 if exist !current_exe!.backup (
@@ -1352,6 +1425,21 @@ def get_current_version() -> str:
     Returns:
         版本号字符串
     """
+    # 先尝试从已导入模块与动态导入获取版本
+    try:
+        if app_meta and hasattr(app_meta, "__version__"):
+            return str(getattr(app_meta, "__version__"))
+    except Exception:
+        pass
+
+    try:
+        import importlib
+        mod = importlib.import_module("version")
+        if hasattr(mod, "__version__"):
+            return str(getattr(mod, "__version__"))
+    except Exception:
+        pass
+
     # 尝试从version.py文件读取
     version_file = os.path.join(os.path.dirname(__file__), 'version.py')
     if os.path.exists(version_file):

@@ -22,7 +22,10 @@ a = Analysis(
         # 确保Pillow的二进制文件被包含
     ],
     datas=[
-        # ('version.py', '.'),  # Removed version.py file
+        ('version.py', '.'),
+        ('updater.py', '.'),
+        ('external_updater.py', '.'),
+        ('config.py', '.'),
     ] + fake_useragent_datas,
     hiddenimports=(get_hidden_imports() + ['updater', 'external_updater', 'version']),  # 自动从 requirements.txt 读取依赖，并强制包含本地更新模块
     hookspath=[],

@@ -3307,6 +3307,12 @@ python3 "{external_script}" '{update_info_json}'
                 external_updater_script = os.path.join(os.path.dirname(__file__), 'external_updater.py')
             
             if not os.path.exists(external_updater_script):
+                raise FileNotFoundError(f"找不到外部更新脚本: {external_updater_script}")
+            
+            self.log("外部更新脚本已准备就绪")
+        except Exception as e:
+            self.log(f"启动外部更新脚本失败: {e}")
+            messagebox.showerror("更新失败", f"无法启动更新程序: {e}")
 
     def on_update_event(self, event: str, data: any):
         """处理所有更新相关的GUI事件"""

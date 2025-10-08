@@ -506,6 +506,12 @@ class AutoUpdater:
             else:
                 raise Exception(f"不支持的更新文件类型: {update_file}")
 
+            # 写入成功标记，供 GUI 判断更新成功
+            try:
+                self._create_update_log("更新成功完成")
+            except Exception:
+                pass
+
             self._notify_callbacks('install_complete', None)
             return True
 
@@ -1015,18 +1021,38 @@ rm -f "$0"
                 with open(log_file, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
 
-                # 分析最后几行日志
-                for line in reversed(lines[-20:]):  # 只看最后20行
-                    if '开始安装更新' in line:
-                        # 提取时间戳
+                # 分析最后几行日志（增强兼容性）
+                for line in reversed(lines[-50:]):  # 扩大到最后50行，提升容错
+                    try:
+                        text = line.strip()
+                        # 提取时间戳（以方括号包裹的第一段）
                         import re
-                        match = re.search(r'\[(.*?)\]', line)
-                        if match:
-                            status['last_update_time'] = match.group(1)
-                    elif '更新成功完成' in line:
-                        status['update_success'] = True
-                    elif '[ERROR]' in line:
-                        status['error_message'] = line.split('] ', 2)[-1].strip()
+                        ts_match = re.search(r'\[(.*?)\]', text)
+
+                        # 识别开始标记
+                        if ('开始安装更新' in text) or ('准备更新到版本' in text):
+                            if ts_match:
+                                status['last_update_time'] = ts_match.group(1)
+                            continue
+
+                        # 识别成功标记
+                        if ('更新成功完成' in text) or ('更新安装成功' in text):
+                            status['update_success'] = True
+                            continue
+
+                        # 识别错误标记
+                        if ('[ERROR]' in text or '安装失败' in text or '下载失败' in text or '更新失败' in text or '错误：' in text):
+                            # 尝试提取更友好的错误消息
+                            if '] ' in text:
+                                status['error_message'] = text.split('] ', 2)[-1].strip()
+                            else:
+                                # 去掉时间戳后返回剩余内容
+                                status['error_message'] = re.sub(r'^\[[^\]]+\]\s*', '', text)
+                            # 一旦检测到错误，仍继续扫描以获取可能的时间戳
+                            continue
+                    except Exception:
+                        # 忽略单行解析异常
+                        pass
 
             except Exception as e:
                 status['error_message'] = f"读取更新日志失败: {e}"

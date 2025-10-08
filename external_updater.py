@@ -46,9 +46,18 @@ except ImportError as e:
 
 
 def log_message(message, level="INFO"):
-    """记录日志消息"""
+    """记录日志消息（同时写入临时 update.log 以便 GUI 检测状态）"""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] [{level}] {message}")
+    line = f"[{timestamp}] [{level}] {message}"
+    print(line)
+    # 同步写入 GUI 解析的日志文件（与 updater._create_update_log 一致）
+    try:
+        log_file = os.path.join(tempfile.gettempdir(), 'update.log')
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(line + '\n')
+    except Exception:
+        # 日志写入失败不影响主流程
+        pass
 
 
 def get_current_exe_path():
@@ -415,6 +424,8 @@ def main():
             CURRENT_EXE_PATH = os.path.abspath(sys.argv[2])
 
         log_message(f"准备更新到版本: {update_info.get('version', 'unknown')}")
+        # 标记开始安装（供 GUI 通过 update.log 解析 last_update_time）
+        log_message(f"开始安装更新: {update_info.get('version', 'unknown')}")
 
         # 步骤1: 下载更新文件
         update_file = download_update_file(update_info)
@@ -438,6 +449,9 @@ def main():
             log_message("清理临时文件完成")
         except Exception as e:
             log_message(f"清理临时文件失败: {e}", "WARNING")
+
+        # 写入成功标记，供 GUI 判断更新成功
+        log_message("更新成功完成")
 
         # 步骤4: 重启应用程序
         log_message("更新完成，准备重启应用程序...")

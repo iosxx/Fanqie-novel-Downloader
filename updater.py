@@ -453,7 +453,7 @@ class AutoUpdater:
     
     def install_update(self, update_file: str, restart: bool = True) -> bool:
         """
-        安装更新
+        安装更新 - 优先使用外部更新机制
 
         Args:
             update_file: 更新文件路径
@@ -462,10 +462,6 @@ class AutoUpdater:
         Returns:
             是否安装成功
         """
-        # 移除官方构建限制，允许所有版本自动更新
-        # if self.official_build_only and not is_official_release_build():
-        #     self._notify_callbacks('install_error', '当前为源码或非官方构建，已禁用自动更新')
-        #     return False
         try:
             self._notify_callbacks('install_start', update_file)
             self._create_update_log(f"开始安装更新: {update_file}")
@@ -485,12 +481,32 @@ class AutoUpdater:
                 raise Exception(f"程序目录无写入权限: {current_dir}")
 
             self._create_update_log(f"程序目录权限检查通过: {current_dir}")
-
-            # 根据文件类型处理
-            if update_file.endswith('.exe'):
-                # Windows可执行文件
-                self._create_update_log("使用Windows EXE更新模式")
-                self._install_windows_exe(update_file, restart)
+            
+            # 优先使用外部更新器进行更新
+            if sys.platform == 'win32' and update_file.endswith('.exe'):
+                # Windows 可执行文件：使用外部更新器
+                self._create_update_log("使用外部更新器进行 Windows EXE 更新")
+                
+                # 创建更新信息，模拟下载完成后的状态  
+                update_info = {
+                    'version': 'manual_update',
+                    'name': 'Manual Update',
+                    'assets': [{
+                        'name': os.path.basename(update_file),
+                        'download_url': 'file:///' + os.path.abspath(update_file).replace('\\', '/'),
+                        'size': os.path.getsize(update_file),
+                        'content_type': 'application/octet-stream'
+                    }]
+                }
+                
+                # 直接调用外部更新机制
+                try:
+                    # 创建一个已下载完成的外部更新脚本
+                    self._launch_external_installer(update_file, restart)
+                except Exception as e:
+                    self._create_update_log(f"外部更新器启动失败，使用备用方案: {e}", "WARNING")
+                    # 备用方案
+                    self._install_windows_exe(update_file, restart)
             elif update_file.endswith('.zip'):
                 # ZIP压缩包
                 self._create_update_log("使用ZIP压缩包更新模式")
@@ -522,6 +538,86 @@ class AutoUpdater:
             print(error_msg)
             return False
     
+    def _launch_external_installer(self, update_file: str, restart: bool):
+        """启动外部安装程序（已下载完成的文件）"""
+        current_exe = sys.executable
+        current_pid = os.getpid()
+        
+        # 创建Windows批处理脚本，直接处理已下载的文件
+        batch_script = os.path.join(tempfile.gettempdir(), 'install_update.bat')
+        batch_content = f'''@echo off
+setlocal enabledelayedexpansion
+chcp 65001 >nul 2>&1
+
+echo [更新器] 准备安装更新...
+
+REM 等待主程序退出
+taskkill /PID {current_pid} /F >nul 2>&1
+timeout /t 3 /nobreak >nul
+
+REM 备份当前文件
+if exist "{current_exe}" (
+    echo [更新器] 创建备份...
+    copy /y "{current_exe}" "{current_exe}.backup" >nul 2>&1
+)
+
+REM 替换文件（多种策略）
+echo [更新器] 正在更新程序...
+set /a retry=0
+:retry_replace
+if !retry! geq 10 goto failed
+
+REM 尝试直接移动
+move /y "{update_file}" "{current_exe}" >nul 2>&1
+if not errorlevel 1 goto success
+
+REM 尝试删除后复制
+del /f /q "{current_exe}" >nul 2>&1
+timeout /t 1 /nobreak >nul
+copy /y "{update_file}" "{current_exe}" >nul 2>&1
+if not errorlevel 1 (
+    del /f /q "{update_file}" >nul 2>&1
+    goto success
+)
+
+set /a retry+=1
+timeout /t 1 /nobreak >nul
+goto retry_replace
+
+:failed
+echo [更新器] 更新失败，恢复备份...
+if exist "{current_exe}.backup" (
+    copy /y "{current_exe}.backup" "{current_exe}" >nul 2>&1
+)
+exit /b 1
+
+:success
+echo [更新器] 更新成功！
+REM 清理备份
+if exist "{current_exe}.backup" del /f /q "{current_exe}.backup" >nul 2>&1
+
+if "{str(restart)}"=="True" (
+    echo [更新器] 重启程序...
+    start "" "{current_exe}"
+)
+
+exit /b 0
+'''
+        
+        with open(batch_script, 'w', encoding='gbk') as f:
+            f.write(batch_content)
+        
+        # 启动批处理脚本
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NO_WINDOW = 0x08000000
+        creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
+        subprocess.Popen(['cmd', '/c', batch_script], creationflags=creationflags)
+        
+        # 通知并退出
+        self._notify_callbacks('install_progress', '外部安装程序已启动，应用将退出以完成更新...')
+        time.sleep(0.5)
+        sys.exit(0)
+    
     def _start_force_update(self, update_info: Dict[str, Any]) -> None:
         """启动强制更新流程：在外部脚本中进行下载与覆盖，当前进程只负责启动与退出。"""
         try:
@@ -535,16 +631,23 @@ class AutoUpdater:
             except Exception:
                 target_exe = sys.executable
 
-            # 直接使用当前可执行文件作为外部更新的载体，通过特殊参数触发 external_updater.main()
-            args = [sys.executable, '--run-updater', update_info_json, target_exe]
-
-            if sys.platform == 'win32':
-                DETACHED_PROCESS = 0x00000008
-                CREATE_NO_WINDOW = 0x08000000
-                creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
-                subprocess.Popen(args, creationflags=creationflags)
+            # 准备外部更新脚本
+            if getattr(sys, 'frozen', False):
+                # 打包后的情况：创建一个独立的Python脚本来执行更新
+                self._create_external_updater_script(update_info_json, target_exe)
             else:
-                subprocess.Popen(args)
+                # 源码运行：直接调用 Python 执行外部更新器
+                import external_updater
+                script_path = os.path.abspath(external_updater.__file__)
+                args = [sys.executable, script_path, update_info_json, target_exe]
+                
+                if sys.platform == 'win32':
+                    DETACHED_PROCESS = 0x00000008
+                    CREATE_NO_WINDOW = 0x08000000
+                    creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
+                    subprocess.Popen(args, creationflags=creationflags)
+                else:
+                    subprocess.Popen(args)
 
             # 通知并退出当前应用，交由外部脚本处理
             self._notify_callbacks('install_progress', '外部更新程序已启动，应用将退出以完成更新...')
@@ -559,126 +662,303 @@ class AutoUpdater:
             except Exception:
                 pass
 
-    def _install_windows_exe(self, exe_path: str, restart: bool):
-        """安装Windows可执行文件（调用外部批处理脚本接管更新）"""
-        current_pid = os.getpid()
-        current_exe = sys.executable
+    def _create_external_updater_script(self, update_info_json: str, target_exe: str):
+        """创建并运行外部更新脚本（用于打包后的exe）"""
+        temp_dir = tempfile.gettempdir()
+        
+        # 创建Python更新脚本
+        updater_script = os.path.join(temp_dir, 'tomato_updater.py')
+        
+        # 将 external_updater.py 的内容复制过来（简化版）
+        script_content = '''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import sys
+import os
+import time
+import json
+import shutil
+import tempfile
+import subprocess
 
-        helper_name = 'update_helper.bat'
-        helper_path = os.path.join(tempfile.gettempdir(), helper_name)
+def log_message(msg, level="INFO"):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{timestamp}] [{level}] {msg}"
+    print(line)
+    try:
+        log_file = os.path.join(tempfile.gettempdir(), 'update.log')
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(line + '\\n')
+    except Exception:
+        pass
 
-        helper_script = fr"""
-@echo off
+def download_file(url, dest, headers=None):
+    """简单的文件下载函数"""
+    try:
+        import urllib.request
+        import urllib.error
+        
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=60) as response:
+            with open(dest, 'wb') as f:
+                shutil.copyfileobj(response, f)
+        return True
+    except Exception as e:
+        log_message(f"下载失败: {e}", "ERROR")
+        return False
+
+def main():
+    if len(sys.argv) < 3:
+        log_message("参数错误", "ERROR")
+        sys.exit(1)
+    
+    update_info = json.loads(sys.argv[1])
+    target_exe = sys.argv[2]
+    current_pid = os.getpid()
+    
+    log_message(f"开始更新到版本: {update_info.get('version', 'unknown')}")
+    
+    # 等待主程序退出
+    log_message("等待主程序退出...")
+    for i in range(30):
+        try:
+            # Windows: 检查进程是否存在
+            if sys.platform == 'win32':
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                SYNCHRONIZE = 0x00100000
+                process = kernel32.OpenProcess(SYNCHRONIZE, 0, int(target_exe.split('.')[-1]) if '.' in target_exe else 0)
+                if process == 0:
+                    break
+                kernel32.CloseHandle(process)
+            else:
+                # Unix: 尝试发送信号0来检查进程
+                os.kill(int(target_exe.split('.')[-1]) if '.' in target_exe else 0, 0)
+        except:
+            break
+        time.sleep(0.5)
+    
+    # 下载新文件
+    assets = update_info.get('assets', [])
+    if not assets:
+        log_message("没有找到下载文件", "ERROR")
+        sys.exit(1)
+    
+    # 选择合适的文件（简化版：选择第一个exe文件）
+    download_url = None
+    for asset in assets:
+        if asset['name'].endswith('.exe'):
+            download_url = asset['download_url']
+            break
+    
+    if not download_url:
+        log_message("没有找到合适的更新文件", "ERROR")
+        sys.exit(1)
+    
+    # 下载到临时文件
+    temp_file = os.path.join(tempfile.gettempdir(), 'update_temp.exe')
+    log_message(f"下载更新文件: {download_url}")
+    
+    headers = {'User-Agent': 'Tomato-Novel-Downloader'}
+    if not download_file(download_url, temp_file, headers):
+        log_message("下载失败", "ERROR")
+        sys.exit(1)
+    
+    # 备份并替换文件
+    backup_file = target_exe + '.backup'
+    log_message(f"备份原文件: {backup_file}")
+    try:
+        if os.path.exists(target_exe):
+            shutil.copy2(target_exe, backup_file)
+    except Exception as e:
+        log_message(f"备份失败: {e}", "ERROR")
+    
+    # 替换文件
+    log_message(f"替换程序文件: {target_exe}")
+    max_retries = 10
+    for i in range(max_retries):
+        try:
+            if os.path.exists(target_exe):
+                os.remove(target_exe)
+            shutil.copy2(temp_file, target_exe)
+            log_message("更新成功完成")
+            break
+        except Exception as e:
+            if i == max_retries - 1:
+                log_message(f"替换失败: {e}", "ERROR")
+                # 恢复备份
+                if os.path.exists(backup_file):
+                    shutil.copy2(backup_file, target_exe)
+                sys.exit(1)
+            time.sleep(0.5)
+    
+    # 清理临时文件
+    try:
+        os.remove(temp_file)
+        if os.path.exists(backup_file):
+            os.remove(backup_file)
+    except:
+        pass
+    
+    # 重启程序
+    log_message("重启程序...")
+    if sys.platform == 'win32':
+        subprocess.Popen([target_exe], creationflags=subprocess.DETACHED_PROCESS)
+    else:
+        subprocess.Popen([target_exe])
+    
+    log_message("更新完成")
+
+if __name__ == "__main__":
+    main()
+'''
+        
+        with open(updater_script, 'w', encoding='utf-8') as f:
+            f.write(script_content)
+        
+        # 使用批处理启动Python脚本
+        batch_script = os.path.join(temp_dir, 'run_updater.bat')
+        batch_content = f'''@echo off
 setlocal enabledelayedexpansion
 chcp 65001 >nul 2>&1
 
-REM 参数：当前PID、当前EXE路径、下载的更新文件路径、是否重启(True/False)
-set target_pid={current_pid}
-set current_exe="{current_exe}"
-set update_file="{exe_path}"
-set do_restart={str(restart)}
+REM 等待主程序退出
+timeout /t 2 /nobreak >nul
 
-echo [Updater] 准备关闭进程 !target_pid! 并执行文件替换
-taskkill /PID !target_pid! /F >nul 2>&1
+REM 查找Python
+set PYTHON_CMD=
+where python >nul 2>&1 && set "PYTHON_CMD=python"
+if not defined PYTHON_CMD where python3 >nul 2>&1 && set "PYTHON_CMD=python3"
+if not defined PYTHON_CMD where py >nul 2>&1 && set "PYTHON_CMD=py"
 
-REM 等待退出，增强的等待机制
-set /a count=0
-:wait_exit
-tasklist /FI "PID eq !target_pid!" 2>nul | find "!target_pid!" >nul
-if errorlevel 1 goto do_update
-set /a count+=1
-if !count! geq 20 (
-    echo [Updater] 进程未退出，继续强制更新
-    goto do_update
-)
-timeout /t 1 /nobreak > nul
-goto wait_exit
-
-:do_update
-echo [Updater] 开始更新文件
-
-REM 备份旧文件（多重备份策略）
-if exist !current_exe! (
-    echo [Updater] 创建备份...
-    copy /y !current_exe! !current_exe!.backup >nul 2>&1
-    if errorlevel 1 (
-        echo [Updater] 主备份失败，使用临时目录备份
-        copy /y !current_exe! "%TEMP%\updater_backup.exe" >nul 2>&1
-    )
-)
-
-REM 替换新文件（改进的替换策略）
-set /a retry=0
-:replace_retry
-echo [Updater] 尝试替换文件...
-
-REM 策略1：直接移动
-move /y !update_file! !current_exe! >nul 2>&1
-if not errorlevel 1 goto replace_success
-
-REM 策略2：删除后复制
-echo [Updater] 使用删除-复制策略...
-del /f /q !current_exe! >nul 2>&1
-timeout /t 1 /nobreak > nul
-copy /y !update_file! !current_exe! >nul 2>&1
-if not errorlevel 1 (
-    del /f /q !update_file! >nul 2>&1
-    goto replace_success
-)
-
-REM 策略3：使用 xcopy
-echo [Updater] 使用 xcopy 策略...
-xcopy /y /h /r !update_file! !current_exe!* >nul 2>&1
-if not errorlevel 1 (
-    del /f /q !update_file! >nul 2>&1
-    goto replace_success
-)
-
-REM 重试
-set /a retry+=1
-if !retry! lss 10 (
-    echo [Updater] 替换失败，重试 !retry!/10
-    timeout /t 2 /nobreak > nul
-    goto replace_retry
+if not defined PYTHON_CMD (
+    echo 未找到Python，尝试直接下载和替换
+    goto direct_update
 ) else (
-    echo [Updater] 替换失败，尝试恢复备份
-    if exist !current_exe!.backup (
-        move /y !current_exe!.backup !current_exe! >nul 2>&1
-    ) else if exist "%TEMP%\updater_backup.exe" (
-        copy /y "%TEMP%\updater_backup.exe" !current_exe! >nul 2>&1
-    )
-    echo [Updater] 更新失败！
+    echo 使用Python执行更新
+    !PYTHON_CMD! "{updater_script}" {json.dumps(update_info_json)} "{target_exe}"
     goto end
 )
 
-:replace_success
-
-REM 清理备份
-if exist !current_exe!.backup (
-    del /f /q !current_exe!.backup >nul 2>&1
-)
-
-if "!do_restart!"=="True" (
-    echo [Updater] 重启程序
-    start "" !current_exe!
-)
+:direct_update
+REM 如果没有Python，使用PowerShell下载和替换
+echo 使用PowerShell进行更新...
+powershell -ExecutionPolicy Bypass -Command "& {{
+    $updateInfo = '{update_info_json}' | ConvertFrom-Json
+    $targetExe = '{target_exe}'
+    $tempFile = [System.IO.Path]::GetTempPath() + 'update_temp.exe'
+    
+    # 等待主程序退出
+    Start-Sleep -Seconds 2
+    
+    # 查找合适的下载URL
+    $downloadUrl = $null
+    foreach ($asset in $updateInfo.assets) {{
+        if ($asset.name -like '*.exe') {{
+            $downloadUrl = $asset.download_url
+            break
+        }}
+    }}
+    
+    if (-not $downloadUrl) {{
+        Write-Host '没有找到下载文件' -ForegroundColor Red
+        exit 1
+    }}
+    
+    # 下载文件
+    try {{
+        Write-Host "下载更新: $downloadUrl"
+        $client = New-Object System.Net.WebClient
+        $client.Headers['User-Agent'] = 'Tomato-Novel-Downloader'
+        $client.DownloadFile($downloadUrl, $tempFile)
+    }} catch {{
+        Write-Host "下载失败: $_" -ForegroundColor Red
+        exit 1
+    }}
+    
+    # 替换文件
+    try {{
+        if (Test-Path $targetExe) {{
+            Copy-Item $targetExe "$targetExe.backup" -Force
+            Remove-Item $targetExe -Force
+        }}
+        Copy-Item $tempFile $targetExe -Force
+        Remove-Item $tempFile -Force
+        Write-Host '更新成功完成' -ForegroundColor Green
+        
+        # 重启程序
+        Start-Process $targetExe
+    }} catch {{
+        Write-Host "替换失败: $_" -ForegroundColor Red
+        if (Test-Path "$targetExe.backup") {{
+            Copy-Item "$targetExe.backup" $targetExe -Force
+        }}
+        exit 1
+    }}
+}}"
 
 :end
 exit /b 0
-"""
-
-        with open(helper_path, 'w', encoding='gbk') as f:
-            f.write(helper_script)
-
-        DETACHED_PROCESS = 0x00000008
-        CREATE_NO_WINDOW = 0x08000000
-        creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
-
-        subprocess.Popen(['cmd', '/c', helper_path], creationflags=creationflags)
-
+'''
+        
+        with open(batch_script, 'w', encoding='gbk') as f:
+            f.write(batch_content)
+        
+        # 启动批处理脚本
+        if sys.platform == 'win32':
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NO_WINDOW = 0x08000000
+            creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
+            subprocess.Popen(['cmd', '/c', batch_script], creationflags=creationflags)
+        
         self._notify_callbacks('install_progress', '外部更新程序已启动，应用将退出以完成更新...')
-        time.sleep(0.5)
-        sys.exit(0)
+
+    def _install_windows_exe(self, exe_path: str, restart: bool):
+        """安装Windows可执行文件（使用外部更新机制）"""
+        # 对于直接调用此方法的情况，使用外部更新器
+        try:
+            # 准备更新信息
+            update_info = {
+                'version': 'local_update',
+                'assets': [{
+                    'name': os.path.basename(exe_path),
+                    'download_url': 'file:///' + exe_path.replace('\\', '/'),
+                }]
+            }
+            
+            # 调用外部更新流程
+            self._start_force_update(update_info)
+        except Exception as e:
+            self._create_update_log(f"启动外部更新失败，使用备用方案: {e}", "WARNING")
+            
+            # 备用方案：使用简单的批处理
+            current_pid = os.getpid()
+            current_exe = sys.executable
+            
+            helper_script = f'''@echo off
+setlocal enabledelayedexpansion
+taskkill /PID {current_pid} /F >nul 2>&1
+timeout /t 3 /nobreak >nul
+move /y "{exe_path}" "{current_exe}" >nul 2>&1
+if errorlevel 1 (
+    del /f /q "{current_exe}" >nul 2>&1
+    copy /y "{exe_path}" "{current_exe}" >nul 2>&1
+)
+if "{restart}"=="True" start "" "{current_exe}"
+exit /b 0
+'''
+            
+            helper_path = os.path.join(tempfile.gettempdir(), 'quick_update.bat')
+            with open(helper_path, 'w', encoding='gbk') as f:
+                f.write(helper_script)
+            
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NO_WINDOW = 0x08000000
+            creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
+            subprocess.Popen(['cmd', '/c', helper_path], creationflags=creationflags)
+            
+            self._notify_callbacks('install_progress', '更新程序已启动，应用将退出...')
+            time.sleep(0.5)
+            sys.exit(0)
     
     def _install_from_zip(self, zip_path: str, restart: bool):
         """从ZIP文件安装更新"""

@@ -1123,7 +1123,6 @@ class ModernNovelDownloaderGUI:
         """显示书籍详情线程函数"""
         try:
             # 确保API已初始化
-{{ ... }}
             if self.api is None:
                 self.initialize_api()
                 

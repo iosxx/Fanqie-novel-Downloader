@@ -3,17 +3,27 @@
 import os
 import sys
 from PyInstaller.utils.hooks import collect_data_files
-from build_config import get_hidden_imports
 sys.setrecursionlimit(sys.getrecursionlimit() * 5)
 
+# Try to import build_config, but fallback to manual list if it fails
+try:
+    from build_config import get_hidden_imports
+    extra_hidden = get_hidden_imports()
+except ImportError:
+    print("Warning: build_config.py not found, using minimal imports")
+    extra_hidden = []
+
 # Ensure PyInstaller searches the project root for local modules
-project_root = os.path.dirname(os.path.abspath(sys.argv[0]))
+# Fix the path to ensure it works in GitHub Actions
+if 'SPECPATH' in locals():
+    project_root = os.path.dirname(os.path.abspath(SPECPATH))
+else:
+    project_root = os.path.dirname(os.path.abspath(__file__))
 
 block_cipher = None
 
-# 收集 fake_useragent 数据文件
+#  fake_useragent
 fake_useragent_datas = collect_data_files('fake_useragent')
-
 # 分析需要包含的模块
 a = Analysis(
     ['gui.py'],
@@ -27,10 +37,10 @@ a = Analysis(
         ('external_updater.py', '.'),
         ('config.py', '.'),
     ] + fake_useragent_datas,
-    hiddenimports=(get_hidden_imports() + ['updater', 'external_updater', 'version']),  # 自动从 requirements.txt 读取依赖，并强制包含本地更新模块
+    hiddenimports=(extra_hidden + ['updater', 'external_updater', 'version', 'config']),  # 自动从 requirements.txt 读取依赖，并强制包含本地更新模块
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['runtime_hook.py'],
     excludes=[
         'matplotlib',
         'pandas',

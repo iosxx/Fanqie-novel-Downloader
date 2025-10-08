@@ -6,6 +6,9 @@ from PyInstaller.utils.hooks import collect_data_files
 from build_config import get_hidden_imports
 sys.setrecursionlimit(sys.getrecursionlimit() * 5)
 
+# Ensure PyInstaller searches the project root for local modules
+project_root = os.path.dirname(os.path.abspath(__file__))
+
 block_cipher = None
 
 # 收集 fake_useragent 数据文件
@@ -14,7 +17,7 @@ fake_useragent_datas = collect_data_files('fake_useragent')
 # 分析需要包含的模块
 a = Analysis(
     ['gui.py'],
-    pathex=[],
+    pathex=[project_root],
     binaries=[
         # 确保Pillow的二进制文件被包含
     ],
@@ -71,4 +74,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='icon.ico' if os.path.exists('icon.ico') else None,
-) 
+)
+ 

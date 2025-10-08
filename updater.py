@@ -56,7 +56,7 @@ def _get_packaging_version():
 
 try:
 	# 引入构建元信息，避免与packaging.version冲突
-	import version as app_meta
+	import config as app_meta
 except Exception:
 	app_meta = None
 

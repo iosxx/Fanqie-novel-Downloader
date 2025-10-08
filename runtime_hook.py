@@ -16,7 +16,7 @@ if hasattr(sys, '_MEIPASS'):
     import importlib.util
     
     # List of local modules that need to be available
-    local_modules = ['updater', 'external_updater', 'version', 'config']
+    local_modules = ['updater', 'external_updater', 'config']
     
     for module_name in local_modules:
         module_path = os.path.join(sys._MEIPASS, f'{module_name}.py')

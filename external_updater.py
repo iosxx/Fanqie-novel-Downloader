@@ -37,8 +37,7 @@ sys.path.insert(0, current_dir)
 
 try:
     from updater import AutoUpdater
-    from version import __github_repo__, __version__
-    from config import CONFIG
+    from config import __github_repo__, __version__, CONFIG
 except ImportError as e:
     print(f"[Updater] 导入失败: {e}")
     sys.exit(1)

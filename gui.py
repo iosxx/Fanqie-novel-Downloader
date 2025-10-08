@@ -11,7 +11,7 @@ from io import BytesIO
 from novel_downloader import NovelDownloaderAPI, api_manager, async_api_manager
 import novel_downloader
 from ebooklib import epub
-from version import __version__, __github_repo__
+from config import __version__, __github_repo__
 import sys
 import platform
 import tempfile

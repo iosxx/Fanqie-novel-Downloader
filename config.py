@@ -1,8 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 配置管理模块 - 基于参考代码的简化版本
+包含版本信息和全局配置
 """
 
+# ===================== 版本信息（从version.py合并）=====================
+__version__ = "1.0.0"
+__author__ = "Tomato Novel Downloader"
+__description__ = "A modern novel downloader with GitHub auto-update support"
+__github_repo__ = "POf-L/Fanqie-novel-Downloader"
+__build_time__ = "2025-01-23 00:00:00 UTC"
+# 构建通道：local(本地开发) / github-actions(官方发布) / custom(自定义构建)
+__build_channel__ = "custom"
+
+# ===================== 导入模块 =====================
 import time
 import requests
 import bs4
@@ -86,5 +97,7 @@ def get_headers() -> Dict[str, str]:
         "Content-Type": "application/json"
     }
 
-# 导出配置和函数
-__all__ = ['CONFIG', 'print_lock', 'make_request', 'get_headers']
+# 导出配置、函数和版本信息
+__all__ = ['CONFIG', 'print_lock', 'get_headers',
+           '__version__', '__author__', '__description__', 
+           '__github_repo__', '__build_time__', '__build_channel__']

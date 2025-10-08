@@ -5,12 +5,12 @@ import sys
 from PyInstaller.utils.hooks import collect_data_files
 sys.setrecursionlimit(sys.getrecursionlimit() * 5)
 
-# Try to import build_config, but fallback to manual list if it fails
+# Try to import build_app, but fallback to manual list if it fails
 try:
-    from build_config import get_hidden_imports
+    from build_app import get_hidden_imports
     extra_hidden = get_hidden_imports()
 except ImportError:
-    print("Warning: build_config.py not found, using minimal imports")
+    print("Warning: build_app.py not found, using minimal imports")
     extra_hidden = []
 
 # Ensure PyInstaller searches the project root for local modules

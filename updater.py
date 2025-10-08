@@ -517,25 +517,85 @@ class AutoUpdater:
             return False
     
     def _start_force_update(self, update_info: Dict[str, Any]) -> None:
-        """启动强制更新流程：下载并安装更新（异步线程执行）。
-        GUI 通过调用该方法触发强制更新。
-        """
-        def _worker():
+        """启动强制更新流程：在外部脚本中进行下载与覆盖，当前进程只负责启动与退出。"""
+        try:
+            # 标记进行中，供GUI侧避免重复外部安装
+            setattr(self, '_force_update_in_progress', True)
+
+            # 准备外部更新脚本路径（优先 PyInstaller 解包目录）
+            bundle_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+            external_src = os.path.join(bundle_dir, 'external_updater.py')
+            if not os.path.exists(external_src):
+                # 兼容：尝试从可执行文件同目录查找
+                try:
+                    exe_dir = os.path.dirname(sys.executable)
+                except Exception:
+                    exe_dir = os.path.dirname(os.path.abspath(__file__))
+                external_src = os.path.join(exe_dir, 'external_updater.py')
+            if not os.path.exists(external_src):
+                raise Exception(f"外部更新脚本不存在: {external_src}")
+
+            # 复制到临时目录执行，避免权限/路径问题
+            temp_dir = tempfile.gettempdir()
+            external_script = os.path.join(temp_dir, 'external_updater.py')
             try:
-                self._notify_callbacks('force_update_start', update_info)
-                # 下载更新
-                file_path = self.download_update(update_info)
-                if not file_path:
-                    raise Exception("下载更新失败或被取消")
-                # 安装并重启
-                ok = self.install_update(file_path, restart=True)
-                if ok:
-                    self._notify_callbacks('force_update_complete', None)
-                else:
-                    self._notify_callbacks('force_update_error', '安装更新失败')
-            except Exception as e:
-                self._notify_callbacks('force_update_error', str(e))
-        threading.Thread(target=_worker, daemon=True).start()
+                shutil.copy2(external_src, external_script)
+            except Exception as copy_err:
+                raise Exception(f"复制更新脚本失败: {copy_err}")
+
+            # 更新信息序列化为 JSON
+            update_info_json = json.dumps(update_info)
+
+            if sys.platform == 'win32':
+                # 生成并启动批处理脚本（查找可用 Python 解释器）
+                escaped_json = update_info_json.replace('"', '\\"')
+                batch_script = f"""@echo off
+setlocal
+cd /d "{temp_dir}"
+set "PYCMD="
+where python >nul 2>&1 && set "PYCMD=python"
+if not defined PYCMD where py >nul 2>&1 && set "PYCMD=py -3"
+if not defined PYCMD where python3 >nul 2>&1 && set "PYCMD=python3"
+if not defined PYCMD (
+  echo [Updater] 未找到可用的 Python 解释器
+  exit /b 1
+)
+%PYCMD% "{external_script}" "{escaped_json}"
+"""
+                batch_file = os.path.join(temp_dir, 'start_update.bat')
+                with open(batch_file, 'w', encoding='gbk') as f:
+                    f.write(batch_script)
+
+                DETACHED_PROCESS = 0x00000008
+                CREATE_NO_WINDOW = 0x08000000
+                creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
+                subprocess.Popen(['cmd', '/c', batch_file], creationflags=creationflags)
+            else:
+                # Unix shell 脚本
+                sh_script = f"""#!/bin/bash
+cd "{temp_dir}"
+pycmd="python3"
+command -v python >/dev/null 2>&1 && pycmd="python"
+$pycmd "{external_script}" '{update_info_json}' >/dev/null 2>&1 &
+"""
+                sh_file = os.path.join(temp_dir, 'start_update.sh')
+                with open(sh_file, 'w') as f:
+                    f.write(sh_script)
+                os.chmod(sh_file, 0o755)
+                subprocess.Popen(['/bin/bash', sh_file])
+
+            # 通知并退出当前应用，交由外部脚本处理
+            self._notify_callbacks('install_progress', '外部更新程序已启动，应用将退出以完成更新...')
+            time.sleep(0.5)
+            sys.exit(0)
+        except Exception as e:
+            self._notify_callbacks('force_update_error', str(e))
+            print(f"启动外部更新失败: {e}")
+        finally:
+            try:
+                setattr(self, '_force_update_in_progress', False)
+            except Exception:
+                pass
 
     def _install_windows_exe(self, exe_path: str, restart: bool):
         """安装Windows可执行文件（调用外部批处理脚本接管更新）"""
@@ -1031,17 +1091,12 @@ rm -f "$0"
 def get_current_version() -> str:
     """
     获取当前版本号
+    优先从 version.py 获取，其次回退到 config.py，最后默认值。
     
     Returns:
         版本号字符串
     """
-    # 先尝试从已导入模块与动态导入获取版本
-    try:
-        if app_meta and hasattr(app_meta, "__version__"):
-            return str(getattr(app_meta, "__version__"))
-    except Exception:
-        pass
-
+    # 优先：动态导入 version 模块（由 GitHub Actions 生成，包含准确版本）
     try:
         import importlib
         mod = importlib.import_module("version")
@@ -1050,30 +1105,25 @@ def get_current_version() -> str:
     except Exception:
         pass
 
-    # 尝试从version.py文件读取
-    version_file = os.path.join(os.path.dirname(__file__), 'version.py')
-    if os.path.exists(version_file):
-        try:
+    # 次优先：读取本地 version.py 文件
+    try:
+        version_file = os.path.join(os.path.dirname(__file__), 'version.py')
+        if os.path.exists(version_file):
             with open(version_file, 'r', encoding='utf-8') as f:
                 content = f.read()
-                # 查找__version__定义
-                for line in content.split('\n'):
-                    if line.strip().startswith('__version__'):
-                        # 提取版本号，支持单引号和双引号
-                        version_str = line.split('=')[1].strip()
-                        version_str = version_str.strip('"\'')
+            for line in content.split('\n'):
+                if line.strip().startswith('__version__'):
+                    version_str = line.split('=')[1].strip().strip('\"\'')
+                    if version_str:
                         return version_str
-        except Exception as e:
-            print(f"读取版本文件失败: {e}")
-    
-    # 默认版本号
-    return "1.0.0"
+    except Exception as e:
+        print(f"读取版本文件失败: {e}")
 
 
 def check_and_notify_update(updater: AutoUpdater, callback: Optional[Callable] = None):
     """
     后台检查更新并通知
-    
+{{ ... }}
     Args:
         updater: 更新器实例
         callback: 通知回调函数

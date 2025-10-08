@@ -13,6 +13,19 @@ __build_time__ = "2025-01-23 00:00:00 UTC"
 # 构建通道：local(本地开发) / github-actions(官方发布) / custom(自定义构建)
 __build_channel__ = "custom"
 
+# 优先使用 GitHub Actions 注入的 version.py 中的元信息
+try:
+    import version as _ver
+    __version__ = getattr(_ver, "__version__", __version__)
+    __author__ = getattr(_ver, "__author__", __author__)
+    __description__ = getattr(_ver, "__description__", __description__)
+    __github_repo__ = getattr(_ver, "__github_repo__", __github_repo__)
+    __build_time__ = getattr(_ver, "__build_time__", __build_time__)
+    __build_channel__ = getattr(_ver, "__build_channel__", __build_channel__)
+except Exception:
+    # 忽略导入失败，保持默认/本地值
+    pass
+
 # ===================== 导入模块 =====================
 import time
 import requests

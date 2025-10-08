@@ -3349,5 +3349,9 @@ python3 "{external_script}" '{update_info_json}'
         elif event == 'download_error':
             messagebox.showerror("更新失败", f"下载更新文件失败: {data}")
             self.update_progress(0, "更新失败")
+
+
+if __name__ == '__main__':
+    root = tk.Tk()
     app = ModernNovelDownloaderGUI(root)
     root.mainloop()

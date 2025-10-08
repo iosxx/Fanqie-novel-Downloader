@@ -50,15 +50,19 @@ requests.packages.urllib3.disable_warnings()
 
 # 全局配置
 CONFIG = {
-    "max_workers": 12,
-    "max_retries": 3,
-    "request_timeout": 30,
+    "max_workers": 2,  # API限制：每秒最多2个请求
+    "max_retries": 3,  # 重试次数
+    "request_timeout": 30,  # 请求超时时间
     "status_file": "chapter.json",
-    "request_rate_limit": 0.1,
+    "request_rate_limit": 0.5,  # 请求间隔：确保每秒不超过2个请求
     "api_base_url": "https://api-return.cflin.ddns-ip.net",  # 新API基础URL
     "api_endpoint": "/api/xiaoshuo/fanqie",  # 新API端点
     "download_enabled": True,  # 启用章节下载功能
-    "verbose_logging": False  # 是否启用详细日志输出（GUI环境建议关闭）
+    "verbose_logging": False,  # 是否启用详细日志输出（GUI环境建议关闭）
+    "async_batch_size": 2,  # 异步批量下载大小，符合API限制
+    "connection_pool_size": 4,  # HTTP连接池大小
+    "api_rate_limit": 2,  # API速率限制：每秒最多2个请求
+    "rate_limit_window": 1.0  # 速率限制时间窗口（秒）
 }
 
 # 全局锁

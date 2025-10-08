@@ -52,16 +52,24 @@ class APIManager:
         if sess is None:
             sess = requests.Session()
             retries = Retry(
-                total=3,
-                backoff_factor=0.4,
+                total=CONFIG.get("max_retries", 5),  # 使用配置的重试次数
+                backoff_factor=0.3,
                 status_forcelist=(429, 500, 502, 503, 504),
                 allowed_methods=("GET", "POST"),
                 raise_on_status=False,
             )
-            pool_size = max(8, int(CONFIG.get("max_workers", 8)))
-            adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=retries)
+            # 适度的连接池大小（遵守API限制）
+            pool_size = CONFIG.get("connection_pool_size", 4)
+            adapter = HTTPAdapter(
+                pool_connections=pool_size, 
+                pool_maxsize=pool_size, 
+                max_retries=retries,
+                pool_block=False  # 不阻塞等待连接
+            )
             sess.mount('http://', adapter)
             sess.mount('https://', adapter)
+            # 保持连接活跃
+            sess.headers.update({'Connection': 'keep-alive'})
             self._tls.session = sess
         return sess
     
@@ -295,39 +303,99 @@ class APIManager:
 api_manager = APIManager()
 
 class AsyncAPIManager:
-    """异步API管理器，使用 aiohttp"""
+    """异步API管理器，使用 aiohttp - 带速率限制版"""
     def __init__(self):
         self.base_url = CONFIG["api_base_url"]
         self.api_endpoint = CONFIG["api_endpoint"]
         self.full_url = f"{self.base_url}{self.api_endpoint}"
         self._session: Optional[aiohttp.ClientSession] = None
+        self.semaphore = None  # 用于控制并发数
+        self.rate_limiter = None  # 速率限制器
+        self.last_request_time = 0  # 上次请求时间
+        self.request_lock = asyncio.Lock()  # 请求锁，确保速率限制的准确性
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=CONFIG["request_timeout"])
-            connector = aiohttp.TCPConnector(limit_per_host=int(CONFIG.get("max_workers", 16))) # 增加并发连接数
-            self._session = aiohttp.ClientSession(headers=get_headers(), timeout=timeout, connector=connector)
+            timeout = aiohttp.ClientTimeout(
+                total=CONFIG["request_timeout"],
+                connect=5,  # 连接超时
+                sock_read=15  # 读取超时
+            )
+            # 适度的连接池大小（遵守API速率限制）
+            connector = aiohttp.TCPConnector(
+                limit=CONFIG.get("connection_pool_size", 4),  # 总连接数
+                limit_per_host=CONFIG.get("connection_pool_size", 4),  # 每个主机的连接数
+                ttl_dns_cache=300,  # DNS缓存时间
+                enable_cleanup_closed=True,  # 自动清理关闭的连接
+                force_close=False,  # 复用连接
+                keepalive_timeout=30  # 保持连接时间
+            )
+            self._session = aiohttp.ClientSession(
+                headers=get_headers(), 
+                timeout=timeout, 
+                connector=connector,
+                trust_env=True  # 使用系统代理设置
+            )
+            # 初始化信号量控制并发（根据API限制设置）
+            self.semaphore = asyncio.Semaphore(CONFIG.get("api_rate_limit", 2))
+            # 初始化速率限制器
+            self.rate_limiter = asyncio.Semaphore(CONFIG.get("api_rate_limit", 2))
         return self._session
 
     async def close(self):
         if self._session:
             await self._session.close()
 
-    async def get_chapter_content_async(self, chapter_id: str) -> Optional[Dict]:
-        """异步获取章节内容"""
-        session = await self._get_session()
-        params = {"content": chapter_id}
-        try:
-            async with session.get(self.full_url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if "data" in data and isinstance(data["data"], dict):
-                        return data["data"]
-                return None
-        except Exception as e:
-            # 在异步环境中，打印错误但避免阻塞
-            # print(f"获取章节 {chapter_id} 异常: {e}")
+    async def get_chapter_content_async(self, chapter_id: str, retry_count: int = 0) -> Optional[Dict]:
+        """异步获取章节内容，支持自动重试和速率限制"""
+        max_retries = CONFIG.get("max_retries", 3)
+        
+        async with self.semaphore:  # 使用信号量控制并发
+            # 实施速率限制：确保每秒不超过2个请求
+            async with self.request_lock:
+                current_time = time.time()
+                time_since_last = current_time - self.last_request_time
+                if time_since_last < 0.5:  # 确保请求间隔至少0.5秒
+                    await asyncio.sleep(0.5 - time_since_last)
+                
+                self.last_request_time = time.time()
+            
+            session = await self._get_session()
+            params = {"content": chapter_id}
+            
+            for attempt in range(max_retries):
+                try:
+                    async with session.get(self.full_url, params=params) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            if "data" in data and isinstance(data["data"], dict):
+                                return data["data"]
+                        elif response.status == 429:  # 速率限制
+                            await asyncio.sleep(min(2 ** attempt, 10))  # 指数退避
+                            continue
+                        return None
+                except asyncio.TimeoutError:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+                    return None
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.3)
+                        continue
+                    return None
+            
             return None
+    
+    async def warmup_connection_pool(self):
+        """预热连接池，建立初始连接"""
+        try:
+            session = await self._get_session()
+            # 发送一个简单的请求来建立连接
+            async with session.head(self.base_url, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                pass
+        except:
+            pass  # 忽略预热失败
 
 # 全局异步API管理器实例
 async_api_manager = AsyncAPIManager()
@@ -1140,42 +1208,98 @@ def create_epub_book(name, author_name, description, chapter_results, chapters, 
 
 
 async def download_chapters_async(chapters_to_download, chapter_results, downloaded_ids, pbar, gui_callback=None):
-    """异步下载所有章节"""
-    task_to_chapter = {}
-    for chapter in chapters_to_download:
-        task = asyncio.create_task(async_api_manager.get_chapter_content_async(chapter["id"]))
-        task_to_chapter[task] = chapter
-
-    completed_tasks = 0
+    """异步下载所有章节 - 速率限制版"""
     total_tasks = len(chapters_to_download)
-
-    for future in asyncio.as_completed(task_to_chapter.keys()):
-        original_chapter = task_to_chapter[future]
-        try:
-            chapter_data = await future
-            if chapter_data:
-                content = chapter_data.get("content", "")
-                title = chapter_data.get("chapter_name", "")
-                processed_content = process_chapter_content(content)
-
-                chapter_results[original_chapter["index"]] = {
-                    "base_title": original_chapter["title"],
-                    "api_title": title,
-                    "content": processed_content
-                }
-                downloaded_ids.add(original_chapter["id"])
-        except Exception as e:
-            # 可以在这里记录失败的章节以供重试
-            pass
-        finally:
-            completed_tasks += 1
-            if pbar:
-                pbar.update(1)
-            if gui_callback:
-                progress = int((len(chapter_results) / len(chapters_to_download)) * 80) + 10 # 10-90%
-                gui_callback(progress, f"下载中: {len(chapter_results)}/{total_tasks}")
-
+    completed_tasks = 0
+    failed_chapters = []
+    batch_size = CONFIG.get("async_batch_size", 2)  # 遵守API限制
+    
+    # 预热连接池
+    await async_api_manager.warmup_connection_pool()
+    
+    # 批量处理章节（每批2个，符合API限制）
+    for batch_start in range(0, total_tasks, batch_size):
+        batch_end = min(batch_start + batch_size, total_tasks)
+        batch_chapters = chapters_to_download[batch_start:batch_end]
+        
+        # 创建批量任务
+        tasks = []
+        for chapter in batch_chapters:
+            task = asyncio.create_task(
+                download_single_chapter(chapter, chapter_results, downloaded_ids)
+            )
+            tasks.append((task, chapter))
+        
+        # 等待批量任务完成
+        for task, chapter in tasks:
+            try:
+                success = await task
+                if not success:
+                    failed_chapters.append(chapter)
+            except Exception as e:
+                failed_chapters.append(chapter)
+            finally:
+                completed_tasks += 1
+                if pbar:
+                    pbar.update(1)
+                if gui_callback:
+                    progress = int((completed_tasks / total_tasks) * 80) + 10
+                    gui_callback(progress, f"下载中: {completed_tasks}/{total_tasks}")
+    
+    # 重试失败的章节（最多重试一次）
+    if failed_chapters:
+        retry_msg = f"重试失败的 {len(failed_chapters)} 个章节..."
+        if gui_callback:
+            gui_callback(-1, retry_msg)
+        else:
+            with print_lock:
+                print(retry_msg)
+        
+        retry_tasks = []
+        for chapter in failed_chapters:
+            task = asyncio.create_task(
+                download_single_chapter(chapter, chapter_results, downloaded_ids, is_retry=True)
+            )
+            retry_tasks.append((task, chapter))
+        
+        # 等待重试任务
+        for task, chapter in retry_tasks:
+            try:
+                await task
+            except:
+                pass  # 重试失败就放弃
+    
     await async_api_manager.close()
+
+
+async def download_single_chapter(chapter, chapter_results, downloaded_ids, is_retry=False):
+    """下载单个章节的辅助函数"""
+    try:
+        # 如果是重试，延迟更长时间避免触发速率限制
+        if is_retry:
+            await asyncio.sleep(random.uniform(1.0, 2.0))
+        
+        chapter_data = await async_api_manager.get_chapter_content_async(chapter["id"])
+        
+        if chapter_data:
+            content = chapter_data.get("content", "")
+            title = chapter_data.get("chapter_name", "")
+            
+            # 异步处理内容（避免阻塞）
+            processed_content = await asyncio.get_event_loop().run_in_executor(
+                None, process_chapter_content, content
+            )
+            
+            chapter_results[chapter["index"]] = {
+                "base_title": chapter["title"],
+                "api_title": title,
+                "content": processed_content
+            }
+            downloaded_ids.add(chapter["id"])
+            return True
+        return False
+    except Exception as e:
+        return False
 
 def Run(book_id, save_path, file_format='txt', start_chapter=None, end_chapter=None, gui_callback=None):
     """运行下载"""

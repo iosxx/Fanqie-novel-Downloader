@@ -159,16 +159,20 @@ class UpdateChecker:
             print(f"检查更新失败: {e}")
             return None
     
-    def has_update(self, force_check: bool = False) -> bool:
+    def has_update(self, force_check: bool = False, force: Optional[bool] = None) -> bool:
         """
         检查是否有新版本
         
         Args:
             force_check: 是否强制检查
+            force: 兼容旧调用的别名参数（等价于 force_check）
             
         Returns:
             是否有新版本
         """
+        # 兼容旧调用：允许使用 force 关键字作为别名
+        if force is not None:
+            force_check = force
         latest_release = self.get_latest_release(force_check)
         if not latest_release:
             return False

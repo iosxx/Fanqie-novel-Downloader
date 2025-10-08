@@ -3,11 +3,22 @@
 import os
 import sys
 from PyInstaller.utils.hooks import collect_data_files
-from build_config import get_hidden_imports
 sys.setrecursionlimit(sys.getrecursionlimit() * 5)
 
+# Try to import get_hidden_imports from build_app (merged config)
+try:
+    from build_app import get_hidden_imports
+    extra_hidden = get_hidden_imports()
+except Exception:
+    print("Warning: get_hidden_imports not available, using minimal hiddenimports")
+    extra_hidden = []
+
 # Ensure PyInstaller searches the project root for local modules
-project_root = os.path.dirname(os.path.abspath(sys.argv[0]))
+# Use SPECPATH if available to be robust in CI
+if 'SPECPATH' in locals():
+    project_root = os.path.dirname(os.path.abspath(SPECPATH))
+else:
+    project_root = os.path.dirname(os.path.abspath(__file__))
 
 block_cipher = None
 
@@ -22,12 +33,15 @@ a = Analysis(
         # 确保Pillow的二进制文件被包含
     ],
     datas=[
-        # ('version.py', '.'),  # Removed version.py file
+        ('updater.py', '.'),
+        ('external_updater.py', '.'),
+        ('config.py', '.'),
     ] + fake_useragent_datas,
-    hiddenimports=(get_hidden_imports() + ['updater', 'external_updater', 'version']),  # 自动从 requirements.txt 读取依赖，并强制包含本地更新模块
+    # 额外强制包含本地更新相关模块
+    hiddenimports=(extra_hidden + ['updater', 'external_updater', 'config']),
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['runtime_hook.py'],
     excludes=[
         'matplotlib',
         'pandas',

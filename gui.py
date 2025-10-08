@@ -3089,6 +3089,38 @@ API数量: {saved_api_count}个
         
         threading.Thread(target=worker, daemon=True).start()
 
+    def _prompt_update(self, update_info):
+        """弹窗提示用户是否更新，并在确认后触发强制更新流程"""
+        try:
+            ver = update_info.get('version', '?') if isinstance(update_info, dict) else '?'
+            body = update_info.get('body', '') if isinstance(update_info, dict) else ''
+            msg = f"发现新版本 v{ver}，是否现在更新？"
+            if body:
+                msg += f"\n\n更新内容:\n{body[:800]}"
+            if messagebox.askyesno("发现新版本", msg):
+                if hasattr(self, 'updater') and self.updater:
+                    self.updater._start_force_update(update_info)
+        except Exception as e:
+            self.log(f"提示更新失败: {e}")
+
+    def check_update_now(self):
+        """立即检查更新（手动触发）"""
+        try:
+            if not hasattr(self, 'updater') or self.updater is None:
+                messagebox.showerror("更新系统未初始化", "更新系统未正确初始化，无法检查更新。")
+                return
+            # 强制检查最新版本
+            if self.updater.checker.has_update(force=True):
+                info = self.updater.checker.get_latest_release(force_check=True)
+                if info:
+                    self._prompt_update(info)
+                else:
+                    messagebox.showinfo("检查更新", "检测到新版本，但获取详细信息失败。")
+            else:
+                messagebox.showinfo("检查更新", "当前已是最新版本。")
+        except Exception as e:
+            messagebox.showerror("检查更新失败", f"{e}")
+
     def manual_check_update(self):
         """手动检查更新（新方法，统一入口）"""
         try:
@@ -3326,7 +3358,8 @@ python3 "{external_script}" '{update_info_json}'
             
             if messagebox.askyesno("发现新版本", msg):
                 self.log("开始下载更新...")
-                self.updater.download_update(data, callback=self.on_update_event)
+                # 通过 updater 的回调机制接收进度与结果，无需传入 callback
+                self.updater.download_update(data)
 
         elif event == 'no_update':
             self.log("当前已是最新版本。")
@@ -3341,6 +3374,13 @@ python3 "{external_script}" '{update_info_json}'
         elif event == 'download_complete':
             self.log("更新文件下载完成，准备安装...")
             self.update_progress(100, "下载完成，准备安装...")
+            # 若为强制更新流程，内部会直接 install 并重启，此处不再触发外部安装
+            try:
+                if hasattr(self, 'updater') and getattr(self.updater, '_force_update_in_progress', False):
+                    return
+            except Exception:
+                pass
+            # 手动更新流程：启动外部更新脚本
             self.start_external_update(data)  # data 是下载的文件路径
 
         elif event == 'download_error':

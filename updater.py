@@ -522,7 +522,7 @@ class AutoUpdater:
         helper_name = 'update_helper.bat'
         helper_path = os.path.join(tempfile.gettempdir(), helper_name)
 
-        helper_script = f"""
+        helper_script = fr"""
 @echo off
 setlocal enabledelayedexpansion
 chcp 65001 >nul 2>&1
@@ -716,7 +716,6 @@ exit /b 0
                 try:
                     os.chmod(target_path, 0o755)
                 except Exception:
-                    pass
         except Exception as e:
             # 失败则忽略，让后续脚本复制两个并保留旧名（虽然不会生效，但不影响当前运行）
             print(f"重命名解压文件失败: {e}")
@@ -726,15 +725,15 @@ exit /b 0
         current_pid = os.getpid()
         exe_name = os.path.basename(sys.executable)
 
-        script = f"""
+        script = fr"""
 @echo off
 setlocal enabledelayedexpansion
 echo 等待程序退出...
 
+
 REM 强制结束当前进程
 taskkill /PID {current_pid} /F >nul 2>&1
 timeout /t 2 /nobreak > nul
-
 REM 等待进程完全退出，最多等待10秒
 set /a count=0
 :wait_loop

@@ -25,20 +25,314 @@ from ebooklib import epub
 import base64
 import gzip
 from urllib.parse import urlencode
-from api_manager import api_manager, async_api_manager # 导入新的API管理器
 from config import CONFIG, print_lock, get_headers  # 使用config中的配置
+import aiohttp
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from typing import Dict, List, Optional
 
 # 禁用SSL证书验证警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 requests.packages.urllib3.disable_warnings()
 
-# make_request和get_headers已经在config.py中定义，从config导入
+# ===================== API管理器类（从api_manager.py合并）=====================
 
+class APIManager:
+    """新API管理器 - 直接使用 api-return.cflin.ddns-ip.net"""
+    
+    def __init__(self):
+        self.base_url = CONFIG["api_base_url"]
+        self.api_endpoint = CONFIG["api_endpoint"]
+        self.full_url = f"{self.base_url}{self.api_endpoint}"
+        # 线程本地会话，复用连接，减少握手
+        self._tls = threading.local()
 
-# 移除fetch_api_endpoints_from_server函数，改为使用新API
+    def _get_session(self) -> requests.Session:
+        sess = getattr(self._tls, 'session', None)
+        if sess is None:
+            sess = requests.Session()
+            retries = Retry(
+                total=3,
+                backoff_factor=0.4,
+                status_forcelist=(429, 500, 502, 503, 504),
+                allowed_methods=("GET", "POST"),
+                raise_on_status=False,
+            )
+            pool_size = max(8, int(CONFIG.get("max_workers", 8)))
+            adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=retries)
+            sess.mount('http://', adapter)
+            sess.mount('https://', adapter)
+            self._tls.session = sess
+        return sess
+    
+    def search_books(self, keyword: str) -> Optional[Dict]:
+        """搜索书籍
+        参数:
+            keyword: 搜索关键词
+        返回:
+            搜索结果字典或None
+        """
+        try:
+            params = {"search": keyword}
+            response = self._get_session().get(self.full_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # 处理实际的API响应格式
+                if "data" in data:
+                    # 如果data是列表，直接返回
+                    if isinstance(data["data"], list):
+                        return data
+                    # 如果data是字典且包含books
+                    elif isinstance(data["data"], dict) and "books" in data["data"]:
+                        return {
+                            "code": data.get("code", 0),
+                            "data": data["data"]["books"],
+                            "message": data.get("message", "")
+                        }
+                    # 如果data是其他格式
+                    else:
+                        with print_lock:
+                            print(f"搜索响应格式不符: {type(data['data'])}")
+                        return None
+                
+                # 处理文档中描述的标准格式
+                elif data.get("code") == 0 and "data" in data:
+                    return data
+                else:
+                    with print_lock:
+                        print(f"搜索失败: {data.get('message', '未知响应格式')}")
+            else:
+                with print_lock:
+                    print(f"搜索请求失败，状态码: {response.status_code}")
+            return None
+        except Exception as e:
+            with print_lock:
+                print(f"搜索异常: {str(e)}")
+            return None
+    
+    def get_book_info(self, book_id: str) -> Optional[Dict]:
+        """获取书籍信息
+        参数:
+            book_id: 书籍ID
+        返回:
+            书籍信息字典或None
+        """
+        try:
+            params = {"book": book_id}
+            response = self._get_session().get(self.full_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # 处理实际的API响应格式
+                if "data" in data:
+                    # 如果data是字典，直接返回
+                    if isinstance(data["data"], dict):
+                        return data["data"]
+                    # 如果data是其他格式
+                    else:
+                        with print_lock:
+                            print(f"书籍信息响应格式不符: {type(data['data'])}")
+                        return None
+                        
+                # 处理文档中描述的标准格式
+                elif data.get("code") == 0 and "data" in data:
+                    return data["data"]
+                else:
+                    with print_lock:
+                        print(f"获取书籍信息失败: {data.get('message', '未知响应格式')}")
+            else:
+                with print_lock:
+                    print(f"获取书籍信息请求失败，状态码: {response.status_code}")
+            return None
+        except Exception as e:
+            with print_lock:
+                print(f"获取书籍信息异常: {str(e)}")
+            return None
+    
+    def get_chapter_list(self, book_id: str) -> Optional[List[Dict]]:
+        """获取章节列表
+        参数:
+            book_id: 书籍ID
+        返回:
+            章节列表或None
+        """
+        try:
+            params = {"chapter": book_id}
+            response = self._get_session().get(self.full_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # 处理实际的API响应格式
+                if "data" in data:
+                    # 如果data是列表，直接返回
+                    if isinstance(data["data"], list):
+                        # 统一格式
+                        formatted_chapters = []
+                        for ch in data["data"]:
+                            formatted_chapters.append({
+                                "chapter_id": ch.get("item_id", ch.get("chapter_id", "")),
+                                "chapter_name": ch.get("title", ch.get("chapter_name", "")),
+                                "volume_name": ch.get("volume_name", "")
+                            })
+                        return formatted_chapters
+                    # 如果data是字典且包含chapters
+                    elif isinstance(data["data"], dict) and "chapters" in data["data"]:
+                        chapters = data["data"]["chapters"]
+                        # 统一格式
+                        formatted_chapters = []
+                        for ch in chapters:
+                            formatted_chapters.append({
+                                "chapter_id": ch.get("item_id", ch.get("chapter_id", "")),
+                                "chapter_name": ch.get("title", ch.get("chapter_name", "")),
+                                "volume_name": ch.get("volume_name", "")
+                            })
+                        
+                        return formatted_chapters
+                    else:
+                        with print_lock:
+                            print(f"章节列表响应格式不符: {type(data['data'])}")
+                        return None
+                        
+                # 处理文档中描述的标准格式
+                elif data.get("code") == 0 and "data" in data:
+                    chapters = data["data"].get("chapters", [])
+                    # 统一格式
+                    formatted_chapters = []
+                    for ch in chapters:
+                        formatted_chapters.append({
+                            "chapter_id": ch.get("item_id", ch.get("chapter_id", "")),
+                            "chapter_name": ch.get("title", ch.get("chapter_name", "")),
+                            "volume_name": ch.get("volume_name", "")
+                        })
+                    return formatted_chapters
+                else:
+                    with print_lock:
+                        print(f"获取章节列表失败: {data.get('message', '未知响应格式')}")
+            else:
+                with print_lock:
+                    print(f"获取章节列表请求失败，状态码: {response.status_code}")
+            return None
+        except Exception as e:
+            with print_lock:
+                print(f"获取章节列表异常: {str(e)}")
+            return None
+    
+    def get_chapter_content(self, chapter_id: str) -> Optional[Dict]:
+        """获取章节内容
+        参数:
+            chapter_id: 章节ID (格式: 书籍ID_章节序号)
+        返回:
+            章节内容字典或None
+        """
+        try:
+            params = {"content": chapter_id}
+            response = requests.get(self.full_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # 处理实际的API响应格式
+                if "data" in data:
+                    # 如果data是字典，直接返回
+                    if isinstance(data["data"], dict):
+                        return data["data"]
+                    # 如果data是其他格式
+                    else:
+                        with print_lock:
+                            print(f"章节内容响应格式不符: {type(data['data'])}")
+                        return None
+                        
+                # 处理文档中描述的标准格式
+                elif data.get("code") == 0 and "data" in data:
+                    return data["data"]
+                else:
+                    with print_lock:
+                        print(f"获取章节内容失败: {data.get('message', '未知响应格式')}")
+            else:
+                with print_lock:
+                    print(f"获取章节内容请求失败，状态码: {response.status_code}")
+            return None
+        except Exception as e:
+            with print_lock:
+                print(f"获取章节内容异常: {str(e)}")
+            return None
+    
+    def test_connection(self) -> bool:
+        """测试API连接
+        返回:
+            True如果连接成功，False否则
+        """
+        try:
+            # 测试健康检查接口
+            health_url = f"{self.base_url}/health"
+            response = self._get_session().get(health_url, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "healthy":
+                    # 静默成功，减少输出
+                    return True
+            
+            # 如果健康检查失败，尝试获取服务信息
+            info_url = self.base_url + "/"
+            response = self._get_session().get(info_url, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "running":
+                    return True
+                    
+            return False
+        except Exception:
+            # 静默失败，避免刷屏
+            return False
 
+# 全局API管理器实例
+api_manager = APIManager()
 
-# 批量下载功能已移除，使用新API的单章节下载
+class AsyncAPIManager:
+    """异步API管理器，使用 aiohttp"""
+    def __init__(self):
+        self.base_url = CONFIG["api_base_url"]
+        self.api_endpoint = CONFIG["api_endpoint"]
+        self.full_url = f"{self.base_url}{self.api_endpoint}"
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=CONFIG["request_timeout"])
+            connector = aiohttp.TCPConnector(limit_per_host=int(CONFIG.get("max_workers", 16))) # 增加并发连接数
+            self._session = aiohttp.ClientSession(headers=get_headers(), timeout=timeout, connector=connector)
+        return self._session
+
+    async def close(self):
+        if self._session:
+            await self._session.close()
+
+    async def get_chapter_content_async(self, chapter_id: str) -> Optional[Dict]:
+        """异步获取章节内容"""
+        session = await self._get_session()
+        params = {"content": chapter_id}
+        try:
+            async with session.get(self.full_url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if "data" in data and isinstance(data["data"], dict):
+                        return data["data"]
+                return None
+        except Exception as e:
+            # 在异步环境中，打印错误但避免阻塞
+            # print(f"获取章节 {chapter_id} 异常: {e}")
+            return None
+
+# 全局异步API管理器实例
+async_api_manager = AsyncAPIManager()
+
+# ===================== 原有的小说下载功能 =====================
 
 
 def process_chapter_content(content):

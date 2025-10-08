@@ -8,8 +8,7 @@ import requests
 import webbrowser
 from PIL import Image, ImageTk
 from io import BytesIO
-from novel_downloader import NovelDownloaderAPI
-from api_manager import api_manager
+from novel_downloader import NovelDownloaderAPI, api_manager, async_api_manager
 import novel_downloader
 from ebooklib import epub
 from version import __version__, __github_repo__
@@ -1520,7 +1519,7 @@ class ModernNovelDownloaderGUI:
     def _fetch_chapters_and_show_dialog(self, book_id, save_path, file_format):
         """获取章节列表并显示选择对话框"""
         try:
-            from api_manager import api_manager
+            # api_manager 已经在文件开头导入
             
             # 获取章节列表
             chapters = api_manager.get_chapter_list(book_id)
@@ -1726,7 +1725,7 @@ class ModernNovelDownloaderGUI:
         """下载线程函数 - 支持章节范围选择"""
         try:
             # 检查API连接
-            from api_manager import api_manager
+            # api_manager 已经在文件开头导入
             if not api_manager.test_connection():
                 # API连接失败
                 self.root.after(0, lambda: messagebox.showerror(
@@ -2164,7 +2163,7 @@ class ModernNovelDownloaderGUI:
             self.log("程序启动完成，正在测试API连接...")
             
             # 测试API连接
-            from api_manager import api_manager
+            # api_manager 已经在文件开头导入
             if api_manager.test_connection():
                 self.log("API连接正常，可以开始使用")
                 self.update_verification_status("API连接正常 ✓", self.colors['success'])
@@ -2876,8 +2875,7 @@ API数量: {api_count}个
                 return
             
             # 测试API连接
-            import novel_downloader
-            from api_manager import api_manager
+            # api_manager 和 novel_downloader 已经在文件开头导入
             
             # 进行连接测试
             self.update_verification_status("正在测试连接...", self.colors['warning'])
@@ -2952,7 +2950,7 @@ API数量: {api_count}个
         title_label.pack(pady=20)
         
         # 当前API状态
-        from api_manager import api_manager
+        # api_manager 已经在文件开头导入
         api_connected = api_manager.test_connection()
         
         status_text = f"""当前API状态:
@@ -3041,8 +3039,7 @@ API数量: {saved_api_count}个
     def check_existing_verification(self):
         """检查API连接状态"""
         # 检查新API连接
-        import novel_downloader
-        from api_manager import api_manager
+        # api_manager 和 novel_downloader 已经在文件开头导入
         
         if api_manager.test_connection():
             self.update_verification_status("API连接正常 ✓", self.colors['success'])

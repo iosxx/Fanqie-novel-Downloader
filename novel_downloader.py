@@ -16,6 +16,7 @@ import signal
 import sys
 import inspect
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
 from tqdm import tqdm
 from collections import OrderedDict
 from fake_useragent import UserAgent
@@ -24,7 +25,7 @@ from ebooklib import epub
 import base64
 import gzip
 from urllib.parse import urlencode
-from api_manager import api_manager  # 导入新的API管理器
+from api_manager import api_manager, async_api_manager # 导入新的API管理器
 from config import CONFIG, print_lock, get_headers  # 使用config中的配置
 
 # 禁用SSL证书验证警告
@@ -844,6 +845,44 @@ def create_epub_book(name, author_name, description, chapter_results, chapters, 
     return book
 
 
+async def download_chapters_async(chapters_to_download, chapter_results, downloaded_ids, pbar, gui_callback=None):
+    """异步下载所有章节"""
+    task_to_chapter = {}
+    for chapter in chapters_to_download:
+        task = asyncio.create_task(async_api_manager.get_chapter_content_async(chapter["id"]))
+        task_to_chapter[task] = chapter
+
+    completed_tasks = 0
+    total_tasks = len(chapters_to_download)
+
+    for future in asyncio.as_completed(task_to_chapter.keys()):
+        original_chapter = task_to_chapter[future]
+        try:
+            chapter_data = await future
+            if chapter_data:
+                content = chapter_data.get("content", "")
+                title = chapter_data.get("chapter_name", "")
+                processed_content = process_chapter_content(content)
+
+                chapter_results[original_chapter["index"]] = {
+                    "base_title": original_chapter["title"],
+                    "api_title": title,
+                    "content": processed_content
+                }
+                downloaded_ids.add(original_chapter["id"])
+        except Exception as e:
+            # 可以在这里记录失败的章节以供重试
+            pass
+        finally:
+            completed_tasks += 1
+            if pbar:
+                pbar.update(1)
+            if gui_callback:
+                progress = int((len(chapter_results) / len(chapters_to_download)) * 80) + 10 # 10-90%
+                gui_callback(progress, f"下载中: {len(chapter_results)}/{total_tasks}")
+
+    await async_api_manager.close()
+
 def Run(book_id, save_path, file_format='txt', start_chapter=None, end_chapter=None, gui_callback=None):
     """运行下载"""
 
@@ -1004,67 +1043,16 @@ def Run(book_id, save_path, file_format='txt', start_chapter=None, end_chapter=N
         chapter_results = {}
         lock = threading.Lock()
 
-        # 单章下载模式（新API只支持单章下载）
+        # 异步下载模式
         if todo_chapters:
-            log_message(f"开始下载，共 {len(todo_chapters)} 个章节...")
-
-            def download_task(chapter):
-                nonlocal success_count
-                try:
-                    title, content = down_text(chapter["id"], common_headers, book_id)
-                    if content:
-                        with lock:
-                            chapter_results[chapter["index"]] = {
-                                "base_title": chapter["title"],
-                                "api_title": title,
-                                "content": content
-                            }
-                            downloaded.add(chapter["id"])
-                            success_count += 1
-                        return True
-                    else:
-                        with lock:
-                            failed_chapters.append(chapter)
-                        return False
-                except Exception as e:
-                    log_message(f"章节 {chapter['id']} 下载失败: {str(e)}")
-                    with lock:
-                        failed_chapters.append(chapter)
-                    return False
-
-            # 仅生成一次请求头，避免每章产生UA与随机数开销
-            common_headers = get_headers()
-
-            attempt = 1
-            while todo_chapters and attempt <= CONFIG["max_retries"]:
-                log_message(f"\n第 {attempt} 次尝试，剩余 {len(todo_chapters)} 个章节...")
-
-                with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as executor:
-                    futures = [executor.submit(download_task, ch) for ch in todo_chapters]
-                    completed = 0
-
-                    # 在GUI环境下禁用tqdm的控制台输出
-                    disable_tqdm = gui_callback is not None
-                    with tqdm(total=len(todo_chapters), desc=f"第{attempt}次下载进度", disable=disable_tqdm) as pbar:
-                        for future in as_completed(futures):
-                            result = future.result()
-                            completed += 1
-                            pbar.update(1)
-
-                            # 在GUI环境下通过回调更新进度
-                            if gui_callback:
-                                total_completed = len(chapter_results)
-                                current_progress = int((total_completed / len(chapters)) * 80) + 10  # 10-90%
-                                gui_callback(current_progress, f"第{attempt}次尝试：已完成 {completed}/{len(todo_chapters)} 个章节")
-
-                write_downloaded_chapters_in_order()
-                save_status(save_path, downloaded)
-                todo_chapters = failed_chapters.copy()
-                failed_chapters = []
-                attempt += 1
-
-                if todo_chapters:
-                    time.sleep(1)
+            log_message(f"开始异步下载，共 {len(todo_chapters)} 个章节...")
+            disable_tqdm = gui_callback is not None
+            with tqdm(total=len(todo_chapters), desc="下载进度", disable=disable_tqdm) as pbar:
+                asyncio.run(download_chapters_async(todo_chapters, chapter_results, downloaded, pbar, gui_callback))
+            
+            success_count = len(chapter_results)
+            write_downloaded_chapters_in_order()
+            save_status(save_path, downloaded)
 
         if success_count > 0:
             log_message(f"下载完成！成功下载 {success_count} 个章节")

@@ -6,6 +6,8 @@ API管理模块 - 使用新的API接口
 
 import requests
 import threading
+import asyncio
+import aiohttp
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import json
@@ -298,3 +300,42 @@ class APIManager:
 
 # 全局API管理器实例
 api_manager = APIManager()
+
+class AsyncAPIManager:
+    """异步API管理器，使用 aiohttp"""
+    def __init__(self):
+        self.base_url = CONFIG["api_base_url"]
+        self.api_endpoint = CONFIG["api_endpoint"]
+        self.full_url = f"{self.base_url}{self.api_endpoint}"
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=CONFIG["request_timeout"])
+            connector = aiohttp.TCPConnector(limit_per_host=int(CONFIG.get("max_workers", 16))) # 增加并发连接数
+            self._session = aiohttp.ClientSession(headers=get_headers(), timeout=timeout, connector=connector)
+        return self._session
+
+    async def close(self):
+        if self._session:
+            await self._session.close()
+
+    async def get_chapter_content_async(self, chapter_id: str) -> Optional[Dict]:
+        """异步获取章节内容"""
+        session = await self._get_session()
+        params = {"content": chapter_id}
+        try:
+            async with session.get(self.full_url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if "data" in data and isinstance(data["data"], dict):
+                        return data["data"]
+                return None
+        except Exception as e:
+            # 在异步环境中，打印错误但避免阻塞
+            # print(f"获取章节 {chapter_id} 异常: {e}")
+            return None
+
+# 全局异步API管理器实例
+async_api_manager = AsyncAPIManager()
+

@@ -516,6 +516,27 @@ class AutoUpdater:
             print(error_msg)
             return False
     
+    def _start_force_update(self, update_info: Dict[str, Any]) -> None:
+        """启动强制更新流程：下载并安装更新（异步线程执行）。
+        GUI 通过调用该方法触发强制更新。
+        """
+        def _worker():
+            try:
+                self._notify_callbacks('force_update_start', update_info)
+                # 下载更新
+                file_path = self.download_update(update_info)
+                if not file_path:
+                    raise Exception("下载更新失败或被取消")
+                # 安装并重启
+                ok = self.install_update(file_path, restart=True)
+                if ok:
+                    self._notify_callbacks('force_update_complete', None)
+                else:
+                    self._notify_callbacks('force_update_error', '安装更新失败')
+            except Exception as e:
+                self._notify_callbacks('force_update_error', str(e))
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _install_windows_exe(self, exe_path: str, restart: bool):
         """安装Windows可执行文件（调用外部批处理脚本接管更新）"""
         current_pid = os.getpid()

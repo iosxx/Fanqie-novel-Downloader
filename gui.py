@@ -93,8 +93,9 @@ class ModernNovelDownloaderGUI:
             self.updater = None
             self.official_build = False
 
-        # 清理可能残留的更新备份文件
+        # 清理可能残留的更新备份文件和旧日志
         self._cleanup_update_backups()
+        self._cleanup_old_update_logs()
         
         # 配置文件路径
         self.config_file = "config.json"
@@ -3261,49 +3262,49 @@ python3 "{external_script}" '{update_info_json}'
     def _cleanup_update_backups(self):
         """清理可能残留的更新备份文件"""
         try:
-            import os
-            import shutil
-            import sys
-
-            # 获取当前程序目录和可执行文件路径
-            if getattr(sys, 'frozen', False):
-                current_dir = os.path.dirname(sys.executable)
-                exe_name = os.path.basename(sys.executable)
-                backup_file = os.path.join(current_dir, f"{exe_name}.backup")
-                backup_dir = os.path.join(current_dir, "backup")
-
-                # 清理单个备份文件
-                if os.path.exists(backup_file):
-                    try:
-                        os.remove(backup_file)
-                        print("已清理残留的备份文件")
-                    except Exception as e:
-                        print(f"清理备份文件失败: {e}")
-
-                # 清理备份目录
-                if os.path.exists(backup_dir):
-                    try:
-                        # 检查目录是否为空
-                        if not os.listdir(backup_dir):
-                            os.rmdir(backup_dir)
-                            print("已清理空的备份目录")
-                        else:
-                            # 如果目录不为空，尝试删除其中的备份文件
-                            for file in os.listdir(backup_dir):
-                                if file.endswith('.backup'):
-                                    try:
-                                        os.remove(os.path.join(backup_dir, file))
-                                    except Exception:
-                                        pass
-                            # 再次检查是否为空
-                            if not os.listdir(backup_dir):
-                                os.rmdir(backup_dir)
-                                print("已清理备份目录")
-                    except Exception as e:
-                        print(f"清理备份目录失败: {e}")
-
+            # 获取当前可执行文件路径
+            current_exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
+            backup_path = current_exe + '.backup'
+            
+            # 如果存在备份文件，删除它
+            if os.path.exists(backup_path):
+                try:
+                    os.remove(backup_path)
+                    print(f"已清理更新备份文件: {backup_path}")
+                except Exception as e:
+                    print(f"清理备份文件失败: {e}")
+            
+            # 清理临时目录中可能残留的备份
+            temp_backup = os.path.join(tempfile.gettempdir(), 'updater_backup.exe')
+            if os.path.exists(temp_backup):
+                try:
+                    os.remove(temp_backup)
+                    print(f"已清理临时备份文件: {temp_backup}")
+                except Exception as e:
+                    print(f"清理临时备份文件失败: {e}")
+                    
         except Exception as e:
-            print(f"清理备份文件时出错: {e}")
+            print(f"清理更新备份时出错: {e}")
+    
+    def _cleanup_old_update_logs(self):
+        """清理超过7天的更新日志"""
+        try:
+            import time
+            log_file = os.path.join(tempfile.gettempdir(), 'update.log')
+            
+            if os.path.exists(log_file):
+                # 检查文件修改时间
+                file_mtime = os.path.getmtime(log_file)
+                current_time = time.time()
+                days_old = (current_time - file_mtime) / (24 * 3600)
+                
+                # 如果日志超过7天，删除它
+                if days_old > 7:
+                    os.remove(log_file)
+                    print(f"已清理过期的更新日志（{days_old:.1f}天前）")
+        except Exception:
+            # 忽略清理失败，不影响程序运行
+            pass
 
     def _check_last_update_status(self):
         """检查上次更新的状态"""
@@ -3319,6 +3320,8 @@ python3 "{external_script}" '{update_info_json}'
             if status['log_exists']:
                 if status['update_success'] and status['last_update_time']:
                     print(f"上次更新成功完成于: {status['last_update_time']}")
+                    # 清理成功的更新日志
+                    AutoUpdater.clear_update_log()
                 elif status['error_message']:
                     print(f"上次更新失败: {status['error_message']}")
                     # 可以在这里添加用户友好的提示
@@ -3332,9 +3335,16 @@ python3 "{external_script}" '{update_info_json}'
                     except Exception:
                         pass
                 else:
-                    print("检测到更新日志，但无法确定更新状态")
+                    # 这通常是更新过程被中断或者是旧的日志文件
+                    # 不显示误导性消息，只在调试模式下输出
+                    if hasattr(sys, '_MEIPASS') and '-debug' in sys.argv[0].lower():
+                        print("[DEBUG] 检测到未完成的更新日志")
+                    # 清理旧的不完整日志，避免下次启动时再次提示
+                    AutoUpdater.clear_update_log()
         except Exception as e:
-            print(f"检查更新状态失败: {e}")
+            # 只在调试模式下显示错误
+            if hasattr(sys, '_MEIPASS') and '-debug' in sys.argv[0].lower():
+                print(f"[DEBUG] 检查更新状态失败: {e}")
 
     def start_external_update(self, update_file_path: str):
         """启动外部更新脚本"""

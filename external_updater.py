@@ -9,12 +9,27 @@ import sys
 import os
 import time
 import tempfile
-import requests
 import json
 import platform
 import subprocess
 import shutil
 from pathlib import Path
+
+# 延迟导入 requests，避免模块导入失败
+_requests = None
+
+def _get_requests():
+    """延迟导入并获取 requests 模块"""
+    global _requests
+    if _requests is None:
+        try:
+            import requests as req
+            _requests = req
+        except ImportError as e:
+            print(f"[Updater] 错误: requests 库未安装")
+            print("[Updater] 请运行: pip install requests")
+            raise ImportError(f"requests 模块未安装: {e}")
+    return _requests
 
 # 添加项目路径以导入内部模块
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -81,6 +96,9 @@ def download_update_file(update_info):
     """下载更新文件"""
     try:
         log_message("开始下载更新文件...")
+
+        # 延迟导入 requests
+        requests = _get_requests()
 
         # 创建更新器实例
         updater = AutoUpdater(__github_repo__, __version__)

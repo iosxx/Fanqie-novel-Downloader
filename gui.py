@@ -1113,14 +1113,17 @@ class ModernNovelDownloaderGUI:
         if index < len(self.search_results_data):
             selected_novel = self.search_results_data[index]
             book_id = selected_novel.get('book_id', '')
-            
-            # 在新线程中获取详情
-            threading.Thread(target=self._show_book_details_thread, args=(book_id,), daemon=True).start()
+            # 如果用户确认，开始下载
+            if confirmed:
+                self.log("开始下载更新...")
+                threading.Thread(target=self.updater.download_update, args=(update_info,), daemon=True).start()
+                threading.Thread(target=self.start_external_update, daemon=True).start()
     
     def _show_book_details_thread(self, book_id):
         """显示书籍详情线程函数"""
         try:
             # 确保API已初始化
+{{ ... }}
             if self.api is None:
                 self.initialize_api()
                 
@@ -3127,49 +3130,6 @@ API数量: {saved_api_count}个
             # 调用现有的更新检测方法
             self.check_update_now()
             
-        except Exception as e:
-            messagebox.showerror("检查更新失败", f"无法检查更新：{str(e)}\n\n请检查网络连接。")
-            self.log(f"检查更新失败: {str(e)}")
-
-    def check_update_now(self):
-        """手动检查更新（带提示）"""
-        if not getattr(self, 'official_build', False):
-            releases_url = f"https://github.com/{__github_repo__}/releases/latest"
-            try:
-                webbrowser.open(releases_url)
-            except Exception:
-                pass
-            return
-        def worker():
-            try:
-                update_info = self.updater.check_for_updates(force=True)
-                if update_info:
-                    self.root.after(0, lambda: self._prompt_update(update_info))
-                else:
-                    self.root.after(0, lambda: messagebox.showinfo("检查更新", "当前已是最新版本"))
-            except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("检查更新失败", str(e)))
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _prompt_update(self, update_info):
-        """弹窗提示用户更新"""
-        ver = update_info.get('version', '?')
-        body = update_info.get('body', '').strip()
-        msg = f"发现新版本 v{ver}，是否现在更新？"
-        if body:
-            msg += f"\n\n更新内容:\n{body[:800]}"  # 限制显示长度
-        if messagebox.askyesno("发现新版本", msg):
-            self._start_update(update_info)
-
-    def _start_update(self, update_info):
-        """开始更新（调用外部脚本处理所有更新操作）"""
-        try:
-            self.log(f"开始更新到版本: {update_info.get('version', 'unknown')}")
-
-            # 创建外部更新脚本
-            self._create_external_update_script(update_info)
-
-            # 显示退出提示
             messagebox.showinfo("更新启动",
                               "更新程序已启动，应用程序将关闭。\n"
                               "更新完成后会自动重启程序。")
@@ -3338,15 +3298,51 @@ python3 "{external_script}" '{update_info_json}'
         except Exception as e:
             print(f"检查更新状态失败: {e}")
 
-    def on_update_event(self, event, data):
-        """处理更新过程中的事件回调（外部脚本处理，不需要GUI响应）"""
-        # 由于更新现在由外部脚本完全处理，GUI不再需要响应这些事件
-        # 只记录日志即可
-        if event in ['download_error', 'install_error']:
-            self.log(f"更新事件: {event} - {data}")
+    def start_external_update(self, update_file_path: str):
+        """启动外部更新脚本"""
+        try:
+            # 确保 external_updater.py 存在
+            external_updater_script = os.path.join(os.path.dirname(sys.executable), 'external_updater.py')
+            if not os.path.exists(external_updater_script):
+                # 如果在源码模式下，路径可能不同
+                external_updater_script = os.path.join(os.path.dirname(__file__), 'external_updater.py')
+            
+            if not os.path.exists(external_updater_script):
 
-# 主程序入口
-if __name__ == "__main__":
-    root = tk.Tk()
+    def on_update_event(self, event: str, data: any):
+        """处理所有更新相关的GUI事件"""
+        if event == 'check_start':
+            self.log("正在检查更新...")
+        
+        elif event == 'update_available':
+            self.log(f"发现新版本: {data['version']}")
+            ver = data.get('version', '?')
+            body = data.get('body', '').strip()
+            msg = f"发现新版本 v{ver}，是否现在更新？"
+            if body:
+                msg += f"\n\n更新内容:\n{body[:800]}" # 限制显示长度
+            
+            if messagebox.askyesno("发现新版本", msg):
+                self.log("开始下载更新...")
+                self.updater.download_update(data, callback=self.on_update_event)
+
+        elif event == 'no_update':
+            self.log("当前已是最新版本。")
+            messagebox.showinfo("检查更新", "当前已是最新版本。")
+
+        elif event == 'download_progress':
+            current = data.get('current', 0)
+            total = data.get('total', 1)
+            percent = data.get('percent', 0)
+            self.update_progress(percent, f"正在下载更新: {current//1024}KB / {total//1024}KB")
+
+        elif event == 'download_complete':
+            self.log("更新文件下载完成，准备安装...")
+            self.update_progress(100, "下载完成，准备安装...")
+            self.start_external_update(data)  # data 是下载的文件路径
+
+        elif event == 'download_error':
+            messagebox.showerror("更新失败", f"下载更新文件失败: {data}")
+            self.update_progress(0, "更新失败")
     app = ModernNovelDownloaderGUI(root)
     root.mainloop()

@@ -300,14 +300,12 @@ class AutoUpdater:
         """
         return self.checker.get_update_info() if self.checker.has_update(force) else None
     
-
-    
-        return None
     def _get_platform_asset(self, assets: list, prefer_debug: bool = False) -> Optional[Dict[str, Any]]:
         """
         根据平台和版本类型选择合适的下载文件
         
         Args:
+{{ ... }}
             assets: GitHub Release的资源列表
             prefer_debug: 是否优先选择debug版本
             
@@ -716,6 +714,7 @@ exit /b 0
                 try:
                     os.chmod(target_path, 0o755)
                 except Exception:
+                    pass
         except Exception as e:
             # 失败则忽略，让后续脚本复制两个并保留旧名（虽然不会生效，但不影响当前运行）
             print(f"重命名解压文件失败: {e}")

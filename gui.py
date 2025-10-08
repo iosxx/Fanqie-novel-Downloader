@@ -1494,7 +1494,7 @@ class ModernNovelDownloaderGUI:
         """清理设置文件"""
         try:
             # 清理GUI配置文件
-            config_files = ['gui_config.json', 'downloader_state.json']
+            config_files = ['gui_config.json', 'downloader_state.json', 'config.json']
             cleared_files = []
             
             for config_file in config_files:

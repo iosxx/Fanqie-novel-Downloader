@@ -60,6 +60,35 @@ def log_message(message, level="INFO"):
         pass
 
 
+def wait_for_process_exit(pid, timeout=30):
+    """等待指定进程退出"""
+    log_message(f"等待主程序(PID: {pid})退出...")
+    
+    for i in range(timeout * 2):  # 每0.5秒检查一次
+        try:
+            if platform.system() == 'Windows':
+                # Windows: 使用OpenProcess检查进程是否存在
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                SYNCHRONIZE = 0x00100000
+                process = kernel32.OpenProcess(SYNCHRONIZE, 0, pid)
+                if process == 0:
+                    log_message("主程序已退出")
+                    return True
+                kernel32.CloseHandle(process)
+            else:
+                # Unix: 发送信号0检查进程
+                os.kill(pid, 0)
+        except (OSError, ProcessLookupError):
+            log_message("主程序已退出")
+            return True
+        
+        time.sleep(0.5)
+    
+    log_message(f"等待超时，继续执行更新", "WARNING")
+    return False
+
+
 def get_current_exe_path():
     """获取待更新的目标可执行文件路径（由主程序传入）。"""
     global CURRENT_EXE_PATH
@@ -422,11 +451,28 @@ def main():
         global CURRENT_EXE_PATH
         if len(sys.argv) >= 3:
             CURRENT_EXE_PATH = os.path.abspath(sys.argv[2])
-
+        
+        # 可选：第三个参数为主程序PID
+        main_pid = None
+        if len(sys.argv) >= 4:
+            try:
+                main_pid = int(sys.argv[3])
+                log_message(f"接收到主程序PID: {main_pid}")
+            except ValueError:
+                log_message("无效的PID参数", "WARNING")
         log_message(f"准备更新到版本: {update_info.get('version', 'unknown')}")
+        
+        # 等待主程序退出（如果提供了PID）
+        if main_pid:
+            wait_for_process_exit(main_pid)
+        else:
+            # 没有PID，简单等待
+            log_message("等待主程序退出...")
+            time.sleep(3)
+        
         # 标记开始安装（供 GUI 通过 update.log 解析 last_update_time）
         log_message(f"开始安装更新: {update_info.get('version', 'unknown')}")
-
+        
         # 步骤1: 下载更新文件
         update_file = download_update_file(update_info)
         if not update_file:
@@ -461,12 +507,28 @@ def main():
             log_message("重启失败，请手动重启应用程序", "WARNING")
 
         log_message("=== 更新脚本执行完成 ===")
+        
+        # Windows平台添加暂停，让用户能看到结果
+        if platform.system() == 'Windows':
+            print("\n" + "="*50)
+            print("更新完成！程序已自动重启。")
+            print("按任意键关闭此窗口...")
+            print("="*50)
+            input()
 
     except json.JSONDecodeError as e:
         log_message(f"解析更新信息失败: {e}", "ERROR")
+        if platform.system() == 'Windows':
+            print("\n错误：解析更新信息失败")
+            print("按任意键退出...")
+            input()
         sys.exit(1)
     except Exception as e:
         log_message(f"更新过程中发生错误: {e}", "ERROR")
+        if platform.system() == 'Windows':
+            print(f"\n错误：{e}")
+            print("按任意键退出...")
+            input()
         sys.exit(1)
 
 

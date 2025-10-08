@@ -608,9 +608,9 @@ exit /b 0
             f.write(batch_content)
         
         # 启动批处理脚本
+        # 不使用CREATE_NO_WINDOW，让用户能看到更新过程
         DETACHED_PROCESS = 0x00000008
-        CREATE_NO_WINDOW = 0x08000000
-        creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
+        creationflags = DETACHED_PROCESS
         subprocess.Popen(['cmd', '/c', batch_script], creationflags=creationflags)
         
         # 通知并退出
@@ -639,12 +639,13 @@ exit /b 0
                 # 源码运行：直接调用 Python 执行外部更新器
                 import external_updater
                 script_path = os.path.abspath(external_updater.__file__)
-                args = [sys.executable, script_path, update_info_json, target_exe]
+                # 传递主程序PID作为第三个参数
+                args = [sys.executable, script_path, update_info_json, target_exe, str(os.getpid())]
                 
                 if sys.platform == 'win32':
+                    # 不使用CREATE_NO_WINDOW，让用户能看到更新过程
                     DETACHED_PROCESS = 0x00000008
-                    CREATE_NO_WINDOW = 0x08000000
-                    creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
+                    creationflags = DETACHED_PROCESS
                     subprocess.Popen(args, creationflags=creationflags)
                 else:
                     subprocess.Popen(args)
@@ -713,29 +714,38 @@ def main():
     
     update_info = json.loads(sys.argv[1])
     target_exe = sys.argv[2]
-    current_pid = os.getpid()
+    
+    # 获取主程序PID（如果传递了第三个参数）
+    main_pid = int(sys.argv[3]) if len(sys.argv) > 3 else None
     
     log_message(f"开始更新到版本: {update_info.get('version', 'unknown')}")
     
     # 等待主程序退出
-    log_message("等待主程序退出...")
-    for i in range(30):
-        try:
-            # Windows: 检查进程是否存在
-            if sys.platform == 'win32':
-                import ctypes
-                kernel32 = ctypes.windll.kernel32
-                SYNCHRONIZE = 0x00100000
-                process = kernel32.OpenProcess(SYNCHRONIZE, 0, int(target_exe.split('.')[-1]) if '.' in target_exe else 0)
-                if process == 0:
-                    break
-                kernel32.CloseHandle(process)
-            else:
-                # Unix: 尝试发送信号0来检查进程
-                os.kill(int(target_exe.split('.')[-1]) if '.' in target_exe else 0, 0)
-        except:
-            break
-        time.sleep(0.5)
+    if main_pid:
+        log_message(f"等待主程序(PID: {main_pid})退出...")
+        for i in range(60):  # 等待30秒
+            try:
+                # Windows: 检查进程是否存在
+                if sys.platform == 'win32':
+                    import ctypes
+                    kernel32 = ctypes.windll.kernel32
+                    SYNCHRONIZE = 0x00100000
+                    process = kernel32.OpenProcess(SYNCHRONIZE, 0, main_pid)
+                    if process == 0:
+                        log_message("主程序已退出")
+                        break
+                    kernel32.CloseHandle(process)
+                else:
+                    # Unix: 尝试发送信号0来检查进程
+                    os.kill(main_pid, 0)
+            except:
+                log_message("主程序已退出")
+                break
+            time.sleep(0.5)
+    else:
+        # 没有PID，简单等待几秒
+        log_message("等待主程序退出...")
+        time.sleep(3)
     
     # 下载新文件
     assets = update_info.get('assets', [])
@@ -807,6 +817,12 @@ def main():
         subprocess.Popen([target_exe])
     
     log_message("更新完成")
+    # 显示完成提示
+    print("\n" + "="*50)
+    print("更新完成！程序将自动重启...")
+    print("按任意键关闭此窗口...")
+    print("="*50)
+    input()
 
 if __name__ == "__main__":
     main()
@@ -835,7 +851,7 @@ if not defined PYTHON_CMD (
     goto direct_update
 ) else (
     echo 使用Python执行更新
-    !PYTHON_CMD! "{updater_script}" {json.dumps(update_info_json)} "{target_exe}"
+    !PYTHON_CMD! "{updater_script}" {json.dumps(update_info_json)} "{target_exe}" {os.getpid()}
     goto end
 )
 
@@ -897,6 +913,10 @@ powershell -ExecutionPolicy Bypass -Command "& {{
 }}"
 
 :end
+echo.
+echo 更新完成！
+echo 按任意键关闭窗口...
+pause >nul
 exit /b 0
 '''
         
@@ -905,9 +925,9 @@ exit /b 0
         
         # 启动批处理脚本
         if sys.platform == 'win32':
+            # 不使用CREATE_NO_WINDOW，让用户能看到更新过程
             DETACHED_PROCESS = 0x00000008
-            CREATE_NO_WINDOW = 0x08000000
-            creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
+            creationflags = DETACHED_PROCESS
             subprocess.Popen(['cmd', '/c', batch_script], creationflags=creationflags)
         
         self._notify_callbacks('install_progress', '外部更新程序已启动，应用将退出以完成更新...')
@@ -951,9 +971,9 @@ exit /b 0
             with open(helper_path, 'w', encoding='gbk') as f:
                 f.write(helper_script)
             
+            # 不使用CREATE_NO_WINDOW，让用户能看到更新过程
             DETACHED_PROCESS = 0x00000008
-            CREATE_NO_WINDOW = 0x08000000
-            creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
+            creationflags = DETACHED_PROCESS
             subprocess.Popen(['cmd', '/c', helper_path], creationflags=creationflags)
             
             self._notify_callbacks('install_progress', '更新程序已启动，应用将退出...')

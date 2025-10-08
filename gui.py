@@ -17,6 +17,24 @@ import platform
 import tempfile
 import shutil
 
+# 内置外部更新入口：当以 '--run-updater' 启动时，直接运行 external_updater 而非 GUI
+if '--run-updater' in sys.argv:
+    try:
+        import external_updater as _ext_updater
+        # 重写 sys.argv 以兼容 external_updater.main() 的入参格式
+        idx = sys.argv.index('--run-updater')
+        new_argv = [sys.argv[0]]
+        if len(sys.argv) > idx + 1:
+            new_argv.append(sys.argv[idx + 1])  # update_info_json
+        if len(sys.argv) > idx + 2:
+            new_argv.append(sys.argv[idx + 2])  # target_exe
+        sys.argv = new_argv
+        _ext_updater.main()
+    except Exception as _e:
+        print(f"外部更新执行失败: {_e}")
+    finally:
+        sys.exit(0)
+
 # 添加HEIC支持
 try:
     from pillow_heif import register_heif_opener
@@ -3155,16 +3173,8 @@ API数量: {saved_api_count}个
             # 显示检查中提示
             self.log("正在检查更新...")
             
-            # 调用现有的更新检测方法
+            # 调用现有的更新检测方法（内部会弹窗询问，用户选择后才会继续）
             self.check_update_now()
-            
-            messagebox.showinfo("更新启动",
-                              "更新程序已启动，应用程序将关闭。\n"
-                              "更新完成后会自动重启程序。")
-
-            # 立即退出应用程序
-            self.root.quit()
-            sys.exit(0)
 
         except Exception as e:
             self.log(f"启动外部更新程序失败: {e}")
@@ -3357,9 +3367,9 @@ python3 "{external_script}" '{update_info_json}'
                 msg += f"\n\n更新内容:\n{body[:800]}" # 限制显示长度
             
             if messagebox.askyesno("发现新版本", msg):
-                self.log("开始下载更新...")
-                # 通过 updater 的回调机制接收进度与结果，无需传入 callback
-                self.updater.download_update(data)
+                self.log("启动外部更新流程...")
+                # 使用外部更新脚本执行下载与覆盖，避免在程序内操作
+                self.updater._start_force_update(data)
 
         elif event == 'no_update':
             self.log("当前已是最新版本。")

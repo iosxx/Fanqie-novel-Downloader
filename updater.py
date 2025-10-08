@@ -522,67 +522,23 @@ class AutoUpdater:
             # 标记进行中，供GUI侧避免重复外部安装
             setattr(self, '_force_update_in_progress', True)
 
-            # 准备外部更新脚本路径（优先 PyInstaller 解包目录）
-            bundle_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-            external_src = os.path.join(bundle_dir, 'external_updater.py')
-            if not os.path.exists(external_src):
-                # 兼容：尝试从可执行文件同目录查找
-                try:
-                    exe_dir = os.path.dirname(sys.executable)
-                except Exception:
-                    exe_dir = os.path.dirname(os.path.abspath(__file__))
-                external_src = os.path.join(exe_dir, 'external_updater.py')
-            if not os.path.exists(external_src):
-                raise Exception(f"外部更新脚本不存在: {external_src}")
-
-            # 复制到临时目录执行，避免权限/路径问题
-            temp_dir = tempfile.gettempdir()
-            external_script = os.path.join(temp_dir, 'external_updater.py')
-            try:
-                shutil.copy2(external_src, external_script)
-            except Exception as copy_err:
-                raise Exception(f"复制更新脚本失败: {copy_err}")
-
-            # 更新信息序列化为 JSON
+            # 更新信息序列化为 JSON，并准备目标可执行文件路径
             update_info_json = json.dumps(update_info)
+            try:
+                target_exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
+            except Exception:
+                target_exe = sys.executable
+
+            # 直接使用当前可执行文件作为外部更新的载体，通过特殊参数触发 external_updater.main()
+            args = [sys.executable, '--run-updater', update_info_json, target_exe]
 
             if sys.platform == 'win32':
-                # 生成并启动批处理脚本（查找可用 Python 解释器）
-                escaped_json = update_info_json.replace('"', '\\"')
-                batch_script = f"""@echo off
-setlocal
-cd /d "{temp_dir}"
-set "PYCMD="
-where python >nul 2>&1 && set "PYCMD=python"
-if not defined PYCMD where py >nul 2>&1 && set "PYCMD=py -3"
-if not defined PYCMD where python3 >nul 2>&1 && set "PYCMD=python3"
-if not defined PYCMD (
-  echo [Updater] 未找到可用的 Python 解释器
-  exit /b 1
-)
-%PYCMD% "{external_script}" "{escaped_json}"
-"""
-                batch_file = os.path.join(temp_dir, 'start_update.bat')
-                with open(batch_file, 'w', encoding='gbk') as f:
-                    f.write(batch_script)
-
                 DETACHED_PROCESS = 0x00000008
                 CREATE_NO_WINDOW = 0x08000000
                 creationflags = DETACHED_PROCESS | CREATE_NO_WINDOW
-                subprocess.Popen(['cmd', '/c', batch_file], creationflags=creationflags)
+                subprocess.Popen(args, creationflags=creationflags)
             else:
-                # Unix shell 脚本
-                sh_script = f"""#!/bin/bash
-cd "{temp_dir}"
-pycmd="python3"
-command -v python >/dev/null 2>&1 && pycmd="python"
-$pycmd "{external_script}" '{update_info_json}' >/dev/null 2>&1 &
-"""
-                sh_file = os.path.join(temp_dir, 'start_update.sh')
-                with open(sh_file, 'w') as f:
-                    f.write(sh_script)
-                os.chmod(sh_file, 0o755)
-                subprocess.Popen(['/bin/bash', sh_file])
+                subprocess.Popen(args)
 
             # 通知并退出当前应用，交由外部脚本处理
             self._notify_callbacks('install_progress', '外部更新程序已启动，应用将退出以完成更新...')

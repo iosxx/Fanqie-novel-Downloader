@@ -17,6 +17,8 @@ from pathlib import Path
 
 # 延迟导入 requests，避免模块导入失败
 _requests = None
+# 目标可执行文件路径（由主程序传入）
+CURRENT_EXE_PATH = None
 
 def _get_requests():
     """延迟导入并获取 requests 模块"""
@@ -50,13 +52,17 @@ def log_message(message, level="INFO"):
 
 
 def get_current_exe_path():
-    """获取当前可执行文件路径"""
-    if getattr(sys, 'frozen', False):
-        # PyInstaller 打包的程序
-        return sys.executable
-    else:
-        # 源码运行
-        return sys.argv[0]
+    """获取待更新的目标可执行文件路径（由主程序传入）。"""
+    global CURRENT_EXE_PATH
+    if CURRENT_EXE_PATH and os.path.exists(CURRENT_EXE_PATH):
+        return CURRENT_EXE_PATH
+    # 回退：尽力推断，但不可靠
+    try:
+        if getattr(sys, 'frozen', False):
+            return sys.executable
+    except Exception:
+        pass
+    return os.path.abspath(sys.argv[0])
 
 
 def backup_current_exe():
@@ -91,15 +97,128 @@ def cleanup_backup(backup_path):
             log_message(f"清理备份文件失败: {e}", "WARNING")
 
 
+class MultiThreadDownloader:
+    """多线程分段下载器（支持 Range）。"""
+    def __init__(self, url: str, dest: str, headers: dict | None = None, threads: int = 6):
+        self.url = url
+        self.dest = dest
+        self.headers = headers or {}
+        self.threads = max(2, int(threads))
+        self._stop = False
+
+    def _supports_range(self, requests):
+        try:
+            resp = requests.head(self.url, headers=self.headers, allow_redirects=True, timeout=15)
+            accept_ranges = resp.headers.get('Accept-Ranges', '')
+            cl = int(resp.headers.get('Content-Length', '0') or 0)
+            return ('bytes' in accept_ranges.lower()) and cl > 0, cl
+        except Exception:
+            # HEAD 失败，尝试 GET
+            try:
+                resp = requests.get(self.url, headers=self.headers, stream=True, timeout=15)
+                cl = int(resp.headers.get('Content-Length', '0') or 0)
+                accept_ranges = resp.headers.get('Accept-Ranges', '')
+                resp.close()
+                return ('bytes' in accept_ranges.lower()) and cl > 0, cl
+            except Exception:
+                return False, 0
+
+    def download(self) -> bool:
+        requests = _get_requests()
+        support, total = self._supports_range(requests)
+        if not support or total <= 0:
+            # 回退到单线程
+            return self._single_thread_download(requests)
+
+        # 分段范围
+        part_size = max(1, total // self.threads)
+        ranges = []
+        start = 0
+        for i in range(self.threads):
+            end = (start + part_size - 1) if i < self.threads - 1 else (total - 1)
+            ranges.append((start, end))
+            start = end + 1
+
+        temp_dir = tempfile.gettempdir()
+        part_files = [os.path.join(temp_dir, f"{os.path.basename(self.dest)}.part{i}") for i in range(self.threads)]
+
+        import threading
+        errs: list[Exception] = []
+
+        def worker(idx: int, byte_range: tuple[int, int]):
+            nonlocal errs
+            if self._stop:
+                return
+            s, e = byte_range
+            hdrs = dict(self.headers)
+            hdrs['Range'] = f'bytes={s}-{e}'
+            try:
+                with requests.get(self.url, headers=hdrs, stream=True, timeout=60) as resp:
+                    resp.raise_for_status()
+                    with open(part_files[idx], 'wb') as f:
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            if self._stop:
+                                return
+                            if chunk:
+                                f.write(chunk)
+            except Exception as ex:
+                errs.append(ex)
+                self._stop = True
+
+        threads = []
+        for i, r in enumerate(ranges):
+            t = threading.Thread(target=worker, args=(i, r), daemon=True)
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+
+        if errs or self._stop:
+            for pf in part_files:
+                try:
+                    if os.path.exists(pf):
+                        os.remove(pf)
+                except Exception:
+                    pass
+            return False
+
+        # 合并
+        try:
+            with open(self.dest, 'wb') as out:
+                for pf in part_files:
+                    with open(pf, 'rb') as p:
+                        shutil.copyfileobj(p, out)
+            # 校验大小
+            if os.path.getsize(self.dest) != total:
+                raise IOError("合并后文件大小与预期不符")
+        finally:
+            for pf in part_files:
+                try:
+                    if os.path.exists(pf):
+                        os.remove(pf)
+                except Exception:
+                    pass
+        return True
+
+    def _single_thread_download(self, requests) -> bool:
+        try:
+            with requests.get(self.url, headers=self.headers, stream=True, timeout=60) as resp:
+                resp.raise_for_status()
+                with open(self.dest, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            return True
+        except Exception:
+            return False
+
+
 def download_update_file(update_info):
-    """下载更新文件"""
+    """下载更新文件（优先多线程分段）。"""
     try:
         log_message("开始下载更新文件...")
 
-        # 延迟导入 requests
-        requests = _get_requests()
-
-        # 创建更新器实例
+        # 创建更新器实例，仅用于选择资产
         updater = AutoUpdater(__github_repo__, __version__)
 
         # 选择合适的下载资源
@@ -114,7 +233,7 @@ def download_update_file(update_info):
         temp_dir = tempfile.gettempdir()
         file_path = os.path.join(temp_dir, asset['name'])
 
-        # 下载文件
+        # 下载文件（带 Range 支持）
         headers = {
             'User-Agent': 'Tomato-Novel-Downloader',
             'Accept': 'application/octet-stream'
@@ -122,24 +241,20 @@ def download_update_file(update_info):
         token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
         if token:
             headers['Authorization'] = f'Bearer {token}'
-        response = requests.get(asset['download_url'], headers=headers, stream=True, timeout=60)
-        response.raise_for_status()
 
-        total_size = int(response.headers.get('content-length', 0))
-        downloaded_size = 0
+        dl = MultiThreadDownloader(asset['download_url'], file_path, headers=headers, threads=min(8, max(4, (os.cpu_count() or 4))))
+        ok = dl.download()
+        if not ok:
+            log_message("多线程下载失败，回退单线程...", "WARNING")
+            # 回退单线程
+            requests = _get_requests()
+            with requests.get(asset['download_url'], headers=headers, stream=True, timeout=60) as resp:
+                resp.raise_for_status()
+                with open(file_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
 
-        with open(file_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded_size += len(chunk)
-
-                    # 显示下载进度
-                    if total_size > 0:
-                        percent = int(downloaded_size * 100 / total_size)
-                        print(f"\r下载进度: {percent}% ({downloaded_size // 1024}KB / {total_size // 1024}KB)", end='', flush=True)
-
-        print()  # 换行
         log_message(f"下载完成: {file_path}")
         return file_path
 
@@ -160,9 +275,28 @@ def install_update_windows(update_file):
             log_message("创建备份失败", "ERROR")
             return False
 
-        # 替换文件
+        # 等待进程释放文件锁并替换文件（带重试）
         log_message(f"替换文件: {current_exe}")
-        shutil.copy2(update_file, current_exe)
+        max_retries = 30  # 最长约15秒
+        for i in range(max_retries):
+            try:
+                shutil.copy2(update_file, current_exe)
+                break
+            except Exception as e:
+                if i == 0:
+                    log_message(f"文件占用，等待释放后重试: {e}")
+                time.sleep(0.5)
+        else:
+            # 尝试删除-复制策略
+            try:
+                os.remove(current_exe)
+                time.sleep(0.2)
+                shutil.copy2(update_file, current_exe)
+            except Exception as e2:
+                log_message(f"替换失败: {e2}", "ERROR")
+                # 恢复备份
+                restore_backup(backup_path)
+                return False
 
         log_message("更新安装成功")
         return True
@@ -274,6 +408,11 @@ def main():
         # 解析更新信息
         update_info_json = sys.argv[1]
         update_info = json.loads(update_info_json)
+
+        # 可选：第二个参数为目标可执行文件路径
+        global CURRENT_EXE_PATH
+        if len(sys.argv) >= 3:
+            CURRENT_EXE_PATH = os.path.abspath(sys.argv[2])
 
         log_message(f"准备更新到版本: {update_info.get('version', 'unknown')}")
 

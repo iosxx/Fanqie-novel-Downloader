@@ -7,7 +7,7 @@ from build_config import get_hidden_imports
 sys.setrecursionlimit(sys.getrecursionlimit() * 5)
 
 # Ensure PyInstaller searches the project root for local modules
-project_root = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.abspath(sys.argv[0]))
 
 block_cipher = None
 

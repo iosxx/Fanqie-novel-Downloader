@@ -433,6 +433,18 @@ def restart_application():
         return False
 
 
+def pause_on_windows(message="按任意键继续..."):
+    """Windows平台暂停等待用户输入"""
+    if platform.system() == 'Windows':
+        print("\n" + "="*50)
+        print(message)
+        print("="*50)
+        try:
+            input()
+        except:
+            time.sleep(5)
+
+
 def main():
     """主函数"""
     log_message("=== 外部更新脚本启动 ===")
@@ -440,6 +452,7 @@ def main():
     # 检查命令行参数
     if len(sys.argv) < 2:
         log_message("错误：缺少更新信息参数", "ERROR")
+        pause_on_windows("错误：缺少更新信息参数\n按任意键退出...")
         sys.exit(1)
 
     try:
@@ -476,7 +489,8 @@ def main():
         # 步骤1: 下载更新文件
         update_file = download_update_file(update_info)
         if not update_file:
-            log_message("下载失败，退出更新", "ERROR")
+            log_message("下载失败，保留旧版本", "ERROR")
+            pause_on_windows("更新下载失败，程序保持原版本\n按任意键退出...")
             sys.exit(1)
 
         # 步骤2: 安装更新
@@ -486,7 +500,8 @@ def main():
             success = install_update_unix(update_file)
 
         if not success:
-            log_message("安装失败，退出更新", "ERROR")
+            log_message("安装失败，已恢复旧版本", "ERROR")
+            pause_on_windows("更新安装失败，已恢复旧版本\n按任意键退出...")
             sys.exit(1)
 
         # 步骤3: 清理临时文件
@@ -496,39 +511,34 @@ def main():
         except Exception as e:
             log_message(f"清理临时文件失败: {e}", "WARNING")
 
+        # 清理备份文件
+        backup_path = get_current_exe_path() + ".backup"
+        cleanup_backup(backup_path)
+
         # 写入成功标记，供 GUI 判断更新成功
         log_message("更新成功完成")
 
         # 步骤4: 重启应用程序
         log_message("更新完成，准备重启应用程序...")
-        time.sleep(1)  # 短暂延迟
+        time.sleep(1)
 
         if not restart_application():
             log_message("重启失败，请手动重启应用程序", "WARNING")
-
-        log_message("=== 更新脚本执行完成 ===")
-        
-        # Windows平台添加暂停，让用户能看到结果
-        if platform.system() == 'Windows':
-            print("\n" + "="*50)
-            print("更新完成！程序已自动重启。")
-            print("按任意键关闭此窗口...")
-            print("="*50)
-            input()
+            pause_on_windows("更新完成，但自动重启失败\n请手动启动程序\n按任意键退出...")
+        else:
+            log_message("=== 更新脚本执行完成 ===")
+            pause_on_windows("更新完成！程序已自动重启\n按任意键关闭此窗口...")
 
     except json.JSONDecodeError as e:
         log_message(f"解析更新信息失败: {e}", "ERROR")
-        if platform.system() == 'Windows':
-            print("\n错误：解析更新信息失败")
-            print("按任意键退出...")
-            input()
+        pause_on_windows(f"错误：解析更新信息失败\n{e}\n按任意键退出...")
         sys.exit(1)
     except Exception as e:
         log_message(f"更新过程中发生错误: {e}", "ERROR")
-        if platform.system() == 'Windows':
-            print(f"\n错误：{e}")
-            print("按任意键退出...")
-            input()
+        import traceback
+        error_detail = traceback.format_exc()
+        log_message(f"详细错误:\n{error_detail}", "ERROR")
+        pause_on_windows(f"更新失败：{e}\n详细信息已记录到日志\n按任意键退出...")
         sys.exit(1)
 
 

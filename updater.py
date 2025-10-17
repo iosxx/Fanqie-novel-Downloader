@@ -14,8 +14,9 @@ import tempfile
 import threading
 import subprocess
 import importlib
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, List
 from datetime import datetime, timedelta
+import platform
 
 # 平台特定的模块导入
 if sys.platform == 'win32':
@@ -584,68 +585,76 @@ class AutoUpdater:
         """
         return self.checker.get_update_info() if self.checker.has_update(force) else None
     
-    def _get_platform_asset(self, assets: list, prefer_debug: bool = False) -> Optional[Dict[str, Any]]:
+    def _get_platform_asset(self, assets: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """
-        根据平台和版本类型选择合适的下载文件
+        根据当前平台和CPU架构，从资产列表中选择最合适的更新文件。
+        采用打分制来选择最佳匹配项。
+        """
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+
+        # 平台和架构的关键字及其得分
+        platform_keywords = {
+            'windows': ['windows', 'win'],
+            'linux': ['linux'],
+            'darwin': ['macos', 'osx', 'darwin']
+        }
         
-        Args:
-{{ ... }}
-            assets: GitHub Release的资源列表
-            prefer_debug: 是否优先选择debug版本
+        arch_keywords = {
+            'x86_64': ['x64', 'amd64', 'x86_64'],
+            'arm64': ['arm64', 'aarch64']
+        }
+        
+        best_asset = None
+        highest_score = -1
+
+        current_platform = None
+        for p, keys in platform_keywords.items():
+            if system in p:
+                current_platform = keys
+                break
+        
+        current_arch = None
+        for arch, keys in arch_keywords.items():
+            if arch in machine or (system == 'darwin' and 'arm' in machine): # macOS arm special case
+                current_arch = keys
+                break
+        
+        # 兼容x86
+        if not current_arch and ('x86' in machine or 'i686' in machine):
+            current_arch = arch_keywords['x86_64']
+
+        for asset in assets:
+            name = asset.get('name', '').lower()
+            score = 0
             
-        Returns:
-            匹配的资源字典,如果没有找到则返回None
-        """
-        if not assets:
-            return None
-        
-        platform = sys.platform.lower()
-        
-        # 根据偏好过滤debug或release版本
-        if prefer_debug:
-            filtered_assets = [a for a in assets if 'debug' in a['name'].lower()]
-        else:
-            filtered_assets = [a for a in assets if 'debug' not in a['name'].lower()]
-        
-        # 如果过滤后没有资源,使用所有资源
-        if not filtered_assets:
-            filtered_assets = assets
+            # 必须是压缩包
+            if not name.endswith(('.zip', '.tar.gz')):
+                continue
 
-        # 根据平台定义优先级检查函数
-        if platform == 'win32':
-            predicates = [
-                lambda n: n.endswith('.exe') and any(k in n for k in ['win', 'windows', 'x64', 'amd64']),
-                lambda n: n.endswith('.exe'),  # 任何exe作为备选
-                lambda n: any(k in n for k in ['win', 'windows']) and n.endswith('.zip'),
-                lambda n: n.endswith('.zip')
-            ]
-        elif platform.startswith('linux'):
-            predicates = [
-                lambda n: n.endswith(('.AppImage', '.appimage')),  # AppImage优先(支持大小写)
-                lambda n: ('linux' in n) and (n.endswith('.tar.gz') or n.endswith('.tgz')),
-                lambda n: ('linux' in n) and n.endswith('.zip'),
-                lambda n: (n.endswith('.tar.gz') or n.endswith('.tgz')),
-                lambda n: n.endswith('.zip')
-            ]
-        elif platform == 'darwin':
-            predicates = [
-                lambda n: n.lower().endswith('.dmg'),
-                lambda n: ('mac' in n or 'darwin' in n) and n.lower().endswith('.zip'),
-                lambda n: n.lower().endswith('.zip')
-            ]
-        else:
-            predicates = [lambda n: n.endswith('.zip')]
+            # 匹配平台
+            if current_platform:
+                for key in current_platform:
+                    if key in name:
+                        score += 5
+                        break
+            
+            # 匹配架构
+            if current_arch:
+                for key in current_arch:
+                    if key in name:
+                        score += 3
+                        break
+            
+            # 优先选择非debug版本
+            if 'debug' not in name:
+                score += 1
 
-        assets_by_name = [(asset, asset['name'].lower()) for asset in filtered_assets]
-        for pred in predicates:
-            for asset, lower_name in assets_by_name:
-                try:
-                    if pred(lower_name):
-                        return asset
-                except Exception:
-                    continue
+            if score > highest_score:
+                highest_score = score
+                best_asset = asset
 
-        return None
+        return best_asset
     
     def download_update(self, update_info: Dict[str, Any], 
                        progress_callback: Optional[Callable] = None) -> Optional[str]:
@@ -853,61 +862,72 @@ class AutoUpdater:
         current_exe = sys.executable
         current_pid = os.getpid()
         
+        # 定义日志文件路径
+        log_file = os.path.join(tempfile.gettempdir(), 'tomato_update_debug.log')
+        
         # 创建Windows批处理脚本，直接处理已下载的文件（调试模式）
         batch_script = os.path.join(tempfile.gettempdir(), 'install_update.bat')
         batch_content = f'''@echo off
 setlocal enabledelayedexpansion
 chcp 65001 >nul 2>&1
 
-echo ========================================
-echo [更新器调试模式] 准备安装更新
-echo ========================================
-echo [DEBUG] 更新文件: {update_file}
-echo [DEBUG] 目标文件: {current_exe}
-echo [DEBUG] 主程序PID: {current_pid}
+set LOG_FILE="{log_file}"
+echo. >> %LOG_FILE%
+echo ================================================================== >> %LOG_FILE%
+echo [%date% %time%] [Updater] Starting external installer script. >> %LOG_FILE%
+echo ================================================================== >> %LOG_FILE%
+
+echo [Updater] Update script started. See log for details: %LOG_FILE%
 echo.
 
+echo [%date% %time%] [Debug] Update File: {update_file} >> %LOG_FILE%
+echo [%date% %time%] [Debug] Target Executable: {current_exe} >> %LOG_FILE%
+echo [%date% %time%] [Debug] Main Process PID: {current_pid} >> %LOG_FILE%
+
 REM 等待主程序退出
-echo [步骤1/5] 等待主程序退出...
+echo [%date% %time%] [Step 1/5] Waiting for main application to exit... >> %LOG_FILE%
 taskkill /PID {current_pid} /F >nul 2>&1
+echo [%date% %time%] [Debug] Taskkill command sent for PID {current_pid}. >> %LOG_FILE%
 timeout /t 3 /nobreak >nul
 
 REM 验证更新文件存在
+echo [%date% %time%] [Step 2/5] Verifying update file... >> %LOG_FILE%
 if not exist "{update_file}" (
-    echo [ERROR] 更新文件不存在: {update_file}
-    echo.
+    echo [%date% %time%] [ERROR] Update file does not exist: {update_file} >> %LOG_FILE%
+    echo [Updater] ERROR: Update file not found.
     pause
     exit /b 1
 )
-echo [DEBUG] 更新文件大小: 
-dir "{update_file}" | find "{os.path.basename(update_file)}"
+echo [%date% %time%] [Debug] Update file found. Size: >> %LOG_FILE%
+dir "{update_file}" | find "{os.path.basename(update_file)}" >> %LOG_FILE%
 
 REM 备份当前文件
-echo [步骤2/5] 创建备份...
+echo [%date% %time%] [Step 3/5] Backing up current application... >> %LOG_FILE%
 if exist "{current_exe}" (
     copy /y "{current_exe}" "{current_exe}.backup" >nul 2>&1
     if errorlevel 1 (
-        echo [ERROR] 备份失败
+        echo [%date% %time%] [ERROR] Backup failed. >> %LOG_FILE%
+        echo [Updater] ERROR: Backup failed.
         pause
         exit /b 1
     )
-    echo [DEBUG] 备份成功
+    echo [%date% %time%] [Debug] Backup created successfully at "{current_exe}.backup" >> %LOG_FILE%
 ) else (
-    echo [WARNING] 目标文件不存在
+    echo [%date% %time%] [WARNING] Target executable not found, skipping backup. >> %LOG_FILE%
 )
 
 REM 替换文件（多种策略）
-echo [步骤3/5] 替换程序文件...
+echo [%date% %time%] [Step 4/5] Replacing application files... >> %LOG_FILE%
 set /a retry=0
 :retry_replace
 if !retry! geq 30 goto failed
 
-echo [DEBUG] 尝试第 !retry!/30 次替换...
+echo [%date% %time%] [Debug] Attempting to replace file (try !retry!/30)... >> %LOG_FILE%
 
 REM 尝试直接移动
 move /y "{update_file}" "{current_exe}" >nul 2>&1
 if not errorlevel 1 (
-    echo [DEBUG] 移动策略成功
+    echo [%date% %time%] [Debug] Strategy 'move' successful. >> %LOG_FILE%
     goto verify_success
 )
 
@@ -916,7 +936,7 @@ del /f /q "{current_exe}" >nul 2>&1
 timeout /t 1 /nobreak >nul
 copy /y "{update_file}" "{current_exe}" >nul 2>&1
 if not errorlevel 1 (
-    echo [DEBUG] 删除-复制策略成功
+    echo [%date% %time%] [Debug] Strategy 'del-copy' successful. >> %LOG_FILE%
     del /f /q "{update_file}" >nul 2>&1
     goto verify_success
 )
@@ -928,48 +948,45 @@ if !retry! lss 30 (
 )
 
 :failed
-echo ========================================
-echo [ERROR] 更新失败，恢复备份
-echo ========================================
+echo [%date% %time%] [ERROR] Update failed after multiple retries. Restoring backup. >> %LOG_FILE%
+echo [Updater] ERROR: Update failed. Restoring backup.
 if exist "{current_exe}.backup" (
     copy /y "{current_exe}.backup" "{current_exe}" >nul 2>&1
-    echo [DEBUG] 已恢复备份文件
+    echo [%date% %time%] [Debug] Backup restored. >> %LOG_FILE%
 )
 echo.
 pause
 exit /b 1
 
 :verify_success
-echo [步骤4/5] 验证更新...
+echo [%date% %time%] [Step 5/5] Verifying update... >> %LOG_FILE%
 if exist "{current_exe}" (
-    echo [DEBUG] 目标文件存在
-    dir "{current_exe}" | find "{os.path.basename(current_exe)}"
+    echo [%date% %time%] [Debug] Target file exists. New size: >> %LOG_FILE%
+    dir "{current_exe}" | find "{os.path.basename(current_exe)}" >> %LOG_FILE%
 ) else (
-    echo [ERROR] 目标文件不存在
+    echo [%date% %time%] [ERROR] Target file not found after replacement. >> %LOG_FILE%
     goto failed
 )
 
 :success
-echo [步骤5/5] 清理备份...
+echo [%date% %time%] [Cleanup] Cleaning up backup files... >> %LOG_FILE%
 if exist "{current_exe}.backup" del /f /q "{current_exe}.backup" >nul 2>&1
-echo ========================================
-echo [SUCCESS] 更新成功！
-echo ========================================
-echo.
+echo [%date% %time%] [SUCCESS] Update completed successfully! >> %LOG_FILE%
+echo [Updater] SUCCESS: Update complete!
 
 if "{str(restart)}"=="True" (
-    echo [步骤6/6] 重启程序...
+    echo [%date% %time%] [Restart] Restarting application... >> %LOG_FILE%
+    echo [Updater] Restarting application...
     start "" "{current_exe}"
     timeout /t 2 /nobreak >nul
 )
 
-echo 更新完成，窗口将在5秒后自动关闭...
-echo 或按任意键立即关闭
+echo Updater window will close in 5 seconds...
 timeout /t 5
 exit /b 0
 '''
         
-        with open(batch_script, 'w', encoding='gbk') as f:
+        with open(batch_script, 'w', encoding='utf-8') as f:
             f.write(batch_content)
         
         # 启动批处理脚本（显示窗口以便调试）

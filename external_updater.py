@@ -51,14 +51,18 @@ def log_message(message, level="INFO"):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] [{level}] {message}"
     print(line)
+    sys.stdout.flush()  # 强制刷新输出，确保立即显示
+    
     # 同步写入 GUI 解析的日志文件（与 updater._create_update_log 一致）
     try:
         log_file = os.path.join(tempfile.gettempdir(), 'update.log')
         with open(log_file, 'a', encoding='utf-8') as f:
             f.write(line + '\n')
-    except Exception:
-        # 日志写入失败不影响主流程
-        pass
+            f.flush()  # 强制刷新文件缓冲区
+    except Exception as e:
+        # 日志写入失败也要输出
+        print(f"[WARNING] 写入日志文件失败: {e}")
+        sys.stdout.flush()
 
 
 def wait_for_process_exit(pid, timeout=30):
@@ -301,31 +305,49 @@ def verify_file_checksum(filepath: str, expected_hash: str) -> bool:
     """验证文件的SHA256校验值"""
     import hashlib
     try:
+        log_message(f"[DEBUG] 开始计算SHA256校验值: {filepath}", "DEBUG")
+        log_message(f"[DEBUG] 文件大小: {os.path.getsize(filepath)} 字节", "DEBUG")
+        log_message(f"[DEBUG] 预期SHA256: {expected_hash}", "DEBUG")
+        
         sha256 = hashlib.sha256()
+        bytes_read = 0
         with open(filepath, 'rb') as f:
             while chunk := f.read(8192):
                 sha256.update(chunk)
+                bytes_read += len(chunk)
+                # 每处理10MB输出一次进度
+                if bytes_read % (10 * 1024 * 1024) == 0:
+                    log_message(f"[DEBUG] 已读取 {bytes_read // (1024*1024)} MB", "DEBUG")
         
         actual_hash = sha256.hexdigest().lower()
         expected_hash = expected_hash.lower()
         
+        log_message(f"[DEBUG] 计算完成，实际SHA256: {actual_hash}", "DEBUG")
+        
         if actual_hash != expected_hash:
             log_message(f"SHA256校验失败:", "ERROR")
-            log_message(f"  预期: {expected_hash}", "ERROR")
-            log_message(f"  实际: {actual_hash}", "ERROR")
+            log_message(f"  文件路径: {filepath}", "ERROR")
+            log_message(f"  文件大小: {os.path.getsize(filepath)} 字节", "ERROR")
+            log_message(f"  预期SHA256: {expected_hash}", "ERROR")
+            log_message(f"  实际SHA256: {actual_hash}", "ERROR")
+            log_message(f"  差异长度: 预期{len(expected_hash)}字符 vs 实际{len(actual_hash)}字符", "ERROR")
             return False
         
         log_message(f"SHA256校验通过: {os.path.basename(filepath)}")
         return True
     except Exception as e:
-        log_message(f"计算文件SHA256失败: {e}", "WARNING")
-        return True  # 如果无法计算，跳过校验
+        log_message(f"计算文件SHA256失败: {e}", "ERROR")
+        import traceback
+        log_message(f"[DEBUG] 详细错误: {traceback.format_exc()}", "DEBUG")
+        return False  # 改为返回False，校验失败应该阻止安装
 
 
 def download_update_file(update_info):
     """下载更新文件（优先多线程分段）。"""
     max_retries = 3
     retry_delay = 5
+    
+    log_message(f"[DEBUG] 更新信息: {json.dumps(update_info, indent=2, ensure_ascii=False)}", "DEBUG")
     
     for attempt in range(max_retries):
         try:
@@ -334,17 +356,24 @@ def download_update_file(update_info):
                 time.sleep(retry_delay)
                 
             log_message("开始下载更新文件...")
+            log_message(f"[DEBUG] 当前平台: {platform.system()}", "DEBUG")
 
             # 创建更新器实例，仅用于选择资产
             updater = AutoUpdater(__github_repo__, __version__)
 
             # 选择合适的下载资源
+            log_message(f"[DEBUG] 可用资产数量: {len(update_info['assets'])}", "DEBUG")
+            for idx, ast in enumerate(update_info['assets']):
+                log_message(f"[DEBUG] 资产 {idx+1}: {ast.get('name', 'unknown')}", "DEBUG")
+            
             asset = updater._get_platform_asset(update_info['assets'])
             if not asset:
                 log_message("没有找到适合当前平台的更新文件", "ERROR")
                 return None
 
             log_message(f"选择下载文件: {asset['name']}")
+            log_message(f"[DEBUG] 下载URL: {asset['download_url']}", "DEBUG")
+            log_message(f"[DEBUG] 预期大小: {asset.get('size', 'unknown')} 字节", "DEBUG")
 
             # 创建临时文件
             temp_dir = tempfile.gettempdir()
@@ -422,18 +451,33 @@ def download_update_file(update_info):
                 return None
             
             # SHA256校验（如果有校验值）
+            log_message(f"[DEBUG] 检查是否有校验值...", "DEBUG")
+            log_message(f"[DEBUG] 所有校验值: {update_info.get('checksums', {})}", "DEBUG")
             expected_hash = update_info.get('checksums', {}).get(asset['name'])
             if expected_hash:
-                log_message("正在验证文件完整性...")
+                log_message(f"正在验证文件完整性...")
+                log_message(f"[DEBUG] 找到校验值: {expected_hash}", "DEBUG")
                 if not verify_file_checksum(file_path, expected_hash):
-                    os.remove(file_path)
+                    log_message(f"[ERROR] 文件校验失败，删除已下载的文件", "ERROR")
+                    try:
+                        os.remove(file_path)
+                        log_message(f"[DEBUG] 已删除损坏文件: {file_path}", "DEBUG")
+                    except Exception as e:
+                        log_message(f"[WARNING] 删除文件失败: {e}", "WARNING")
+                    
                     if attempt < max_retries - 1:
-                        log_message("文件校验失败，准备重试...")
+                        log_message("准备重试下载...")
                         continue
-                    return None
+                    else:
+                        log_message("已达到最大重试次数，下载失败", "ERROR")
+                        return None
                 log_message("文件完整性验证通过")
+            else:
+                log_message(f"[WARNING] 未找到SHA256校验值，跳过校验", "WARNING")
+                log_message(f"[DEBUG] 资产名称: {asset['name']}", "DEBUG")
             
             log_message(f"下载完成: {file_path}")
+            log_message(f"[DEBUG] 最终文件大小: {os.path.getsize(file_path)} 字节", "DEBUG")
             return file_path
 
         except Exception as e:
@@ -457,44 +501,73 @@ def install_update_windows(update_file):
     backup_path = None
     try:
         current_exe = get_current_exe_path()
-        log_message("开始安装更新 (Windows)...")
+        log_message("=" * 60)
+        log_message("开始安装更新 (Windows)")
+        log_message("=" * 60)
+        log_message(f"[DEBUG] 更新文件: {update_file}", "DEBUG")
+        log_message(f"[DEBUG] 目标文件: {current_exe}", "DEBUG")
+        log_message(f"[DEBUG] 更新文件大小: {os.path.getsize(update_file)} 字节", "DEBUG")
+        log_message(f"[DEBUG] 目标文件大小: {os.path.getsize(current_exe) if os.path.exists(current_exe) else 0} 字节", "DEBUG")
 
         # 备份当前文件
+        log_message("[步骤1/4] 创建备份...")
         backup_path = backup_current_exe()
         if not backup_path:
             log_message("创建备份失败", "ERROR")
             return False
+        log_message(f"[DEBUG] 备份文件: {backup_path}", "DEBUG")
 
         # 等待文件解锁
+        log_message("[步骤2/4] 等待文件解锁...")
         if not wait_for_file_unlock(current_exe, timeout=15):
             log_message("文件锁等待超时，尝试强制替换", "WARNING")
+        else:
+            log_message("文件已解锁")
 
         # 尝试去除只读属性
+        log_message("[步骤3/4] 调整文件权限...")
         try:
+            old_mode = os.stat(current_exe).st_mode
+            log_message(f"[DEBUG] 原文件权限: {oct(old_mode)}", "DEBUG")
             os.chmod(current_exe, stat.S_IWRITE | stat.S_IREAD)
-        except Exception:
-            pass
+            new_mode = os.stat(current_exe).st_mode
+            log_message(f"[DEBUG] 新文件权限: {oct(new_mode)}", "DEBUG")
+        except Exception as e:
+            log_message(f"[WARNING] 修改权限失败: {e}", "WARNING")
 
         # 替换文件（多种策略，带指数退避重试）
-        log_message(f"替换文件: {current_exe}")
+        log_message("[步骤4/4] 替换程序文件...")
+        log_message(f"目标路径: {current_exe}")
         max_retries = 30
         success = False
         
         for i in range(max_retries):
             try:
+                log_message(f"[DEBUG] 尝试第 {i+1}/{max_retries} 次替换...", "DEBUG")
                 # 策略1: 直接复制覆盖
                 shutil.copy2(update_file, current_exe)
-                success = True
-                break
+                # 验证复制是否成功
+                if os.path.exists(current_exe) and os.path.getsize(current_exe) == os.path.getsize(update_file):
+                    log_message(f"[DEBUG] 复制成功，文件大小匹配", "DEBUG")
+                    success = True
+                    break
+                else:
+                    log_message(f"[WARNING] 复制后文件大小不匹配", "WARNING")
             except PermissionError as e:
                 if i == 0:
                     log_message(f"文件被锁定，等待释放后重试: {e}")
+                elif i % 5 == 0:
+                    log_message(f"[DEBUG] 第 {i} 次尝试仍被锁定...", "DEBUG")
                 # 指数退避，但最大不超过2秒
                 wait_time = min(0.5 * (1.5 ** (i // 5)), 2.0)
                 time.sleep(wait_time)
             except Exception as e:
                 if i == 0:
                     log_message(f"文件操作失败，重试中: {e}")
+                    import traceback
+                    log_message(f"[DEBUG] 详细错误: {traceback.format_exc()}", "DEBUG")
+                elif i % 5 == 0:
+                    log_message(f"[DEBUG] 第 {i} 次尝试失败: {e}", "DEBUG")
                 time.sleep(0.5)
         
         if not success:
@@ -789,14 +862,18 @@ def restart_application():
 
 def pause_on_windows(message="按任意键继续..."):
     """Windows平台暂停等待用户输入"""
-    if platform.system() == 'Windows':
-        print("\n" + "="*50)
-        print(message)
-        print("="*50)
-        try:
-            input()
-        except:
-            time.sleep(5)
+    print("\n" + "="*60)
+    print(message)
+    print("="*60)
+    sys.stdout.flush()
+    try:
+        input()
+    except KeyboardInterrupt:
+        print("\n检测到Ctrl+C，等待5秒后自动退出...")
+        time.sleep(5)
+    except:
+        print("等待用户输入...")
+        time.sleep(10)
 
 
 def check_permissions():
@@ -900,23 +977,34 @@ def request_elevation():
 
 def main():
     """主函数"""
-    log_message("=== 外部更新脚本启动 ===")
+    log_message("=" * 80)
+    log_message("=== 外部更新脚本启动（调试模式） ===")
+    log_message("=" * 80)
+    log_message(f"[DEBUG] Python版本: {sys.version}", "DEBUG")
+    log_message(f"[DEBUG] 工作目录: {os.getcwd()}", "DEBUG")
+    log_message(f"[DEBUG] 脚本路径: {os.path.abspath(__file__)}", "DEBUG")
+    log_message(f"[DEBUG] 命令行参数: {sys.argv}", "DEBUG")
 
     # 检查命令行参数
     if len(sys.argv) < 2:
         log_message("错误：缺少更新信息参数", "ERROR")
+        log_message("用法: python external_updater.py <update_info_json> [target_exe] [main_pid]", "ERROR")
         pause_on_windows("错误：缺少更新信息参数\n按任意键退出...")
         sys.exit(1)
 
     try:
         # 解析更新信息
+        log_message("[阶段1/5] 解析更新信息...")
         update_info_json = sys.argv[1]
+        log_message(f"[DEBUG] 更新信息JSON长度: {len(update_info_json)} 字符", "DEBUG")
         update_info = json.loads(update_info_json)
+        log_message(f"[DEBUG] 解析成功", "DEBUG")
 
         # 可选：第二个参数为目标可执行文件路径
         global CURRENT_EXE_PATH
         if len(sys.argv) >= 3:
             CURRENT_EXE_PATH = os.path.abspath(sys.argv[2])
+            log_message(f"[DEBUG] 目标可执行文件: {CURRENT_EXE_PATH}", "DEBUG")
         
         # 可选：第三个参数为主程序PID
         main_pid = None
@@ -928,47 +1016,66 @@ def main():
                 log_message("无效的PID参数", "WARNING")
         
         log_message(f"准备更新到版本: {update_info.get('version', 'unknown')}")
+        log_message(f"[DEBUG] 更新信息摘要:", "DEBUG")
+        log_message(f"[DEBUG]   - 版本: {update_info.get('version', '?')}", "DEBUG")
+        log_message(f"[DEBUG]   - 资产数量: {len(update_info.get('assets', []))}", "DEBUG")
+        log_message(f"[DEBUG]   - 校验值数量: {len(update_info.get('checksums', {}))}", "DEBUG")
         
         # 检查权限
+        log_message("[阶段2/5] 检查权限...")
         if not check_permissions():
             log_message("权限不足，尝试提权...")
             if not request_elevation():
                 log_message("无法获得必要的权限", "ERROR")
                 pause_on_windows("更新需要管理员权限\n请以管理员身份运行\n按任意键退出...")
                 sys.exit(1)
+        else:
+            log_message("权限检查通过")
         
         # 等待主程序退出（如果提供了PID）
+        log_message("[阶段3/5] 等待主程序退出...")
         if main_pid:
             wait_for_process_exit(main_pid)
         else:
             # 没有PID，简单等待
-            log_message("等待主程序退出...")
+            log_message("未提供主程序PID，等待3秒...")
             time.sleep(3)
         
         # 标记开始安装（供 GUI 通过 update.log 解析 last_update_time）
         log_message(f"开始安装更新: {update_info.get('version', 'unknown')}")
         
         # 步骤1: 下载更新文件
+        log_message("[阶段4/5] 下载更新文件...")
         update_file = download_update_file(update_info)
         if not update_file:
+            log_message("=" * 60, "ERROR")
             log_message("下载失败，保留旧版本", "ERROR")
-            pause_on_windows("更新下载失败，程序保持原版本\n按任意键退出...")
+            log_message("=" * 60, "ERROR")
+            pause_on_windows("更新下载失败，程序保持原版本\n查看上方日志了解详情\n按任意键退出...")
             sys.exit(1)
 
+        log_message(f"[DEBUG] 下载成功: {update_file}", "DEBUG")
+
         # 步骤2: 安装更新
+        log_message("[阶段5/5] 安装更新...")
         if platform.system() == 'Windows':
             success = install_update_windows(update_file)
         else:
             success = install_update_unix(update_file)
 
         if not success:
+            log_message("=" * 60, "ERROR")
             log_message("安装失败，已恢复旧版本", "ERROR")
-            pause_on_windows("更新安装失败，已恢复旧版本\n按任意键退出...")
+            log_message("=" * 60, "ERROR")
+            pause_on_windows("更新安装失败，已恢复旧版本\n查看上方日志了解详情\n按任意键退出...")
             sys.exit(1)
 
         # 步骤3: 清理临时文件
+        log_message("清理临时文件...")
         try:
-            os.remove(update_file)
+            if os.path.exists(update_file):
+                os.remove(update_file)
+                log_message(f"[DEBUG] 已删除: {update_file}", "DEBUG")
             log_message("清理临时文件完成")
         except Exception as e:
             log_message(f"清理临时文件失败: {e}", "WARNING")
@@ -978,29 +1085,51 @@ def main():
         cleanup_backup(backup_path)
 
         # 写入成功标记，供 GUI 判断更新成功
-        log_message("更新成功完成")
+        log_message("=" * 60)
+        log_message("✓ 更新成功完成")
+        log_message("=" * 60)
 
         # 步骤4: 重启应用程序
-        log_message("更新完成，准备重启应用程序...")
+        log_message("准备重启应用程序...")
         time.sleep(1)
 
         if not restart_application():
             log_message("重启失败，请手动重启应用程序", "WARNING")
-            pause_on_windows("更新完成，但自动重启失败\n请手动启动程序\n按任意键退出...")
+            pause_on_windows("更新完成，但自动重启失败\n请手动启动程序\n\n按任意键退出...")
         else:
             log_message("=== 更新脚本执行完成 ===")
-            pause_on_windows("更新完成！程序已自动重启\n按任意键关闭此窗口...")
+            pause_on_windows("更新完成！程序已自动重启\n\n如果程序未启动，请手动启动\n按任意键关闭此窗口...")
 
     except json.JSONDecodeError as e:
+        log_message("=" * 60, "ERROR")
         log_message(f"解析更新信息失败: {e}", "ERROR")
-        pause_on_windows(f"错误：解析更新信息失败\n{e}\n按任意键退出...")
+        log_message("=" * 60, "ERROR")
+        import traceback
+        log_message(f"[DEBUG] 详细错误:\n{traceback.format_exc()}", "DEBUG")
+        pause_on_windows(f"错误：解析更新信息失败\n{e}\n\n按任意键退出...")
         sys.exit(1)
     except Exception as e:
+        log_message("=" * 60, "ERROR")
         log_message(f"更新过程中发生错误: {e}", "ERROR")
+        log_message("=" * 60, "ERROR")
         import traceback
         error_detail = traceback.format_exc()
         log_message(f"详细错误:\n{error_detail}", "ERROR")
-        pause_on_windows(f"更新失败：{e}\n详细信息已记录到日志\n按任意键退出...")
+        
+        # 保存详细日志到文件
+        try:
+            error_log = os.path.join(tempfile.gettempdir(), 'update_error.log')
+            with open(error_log, 'w', encoding='utf-8') as f:
+                f.write(f"更新失败详细日志\n")
+                f.write("=" * 60 + "\n")
+                f.write(f"错误: {e}\n")
+                f.write("=" * 60 + "\n")
+                f.write(error_detail)
+            log_message(f"详细日志已保存到: {error_log}", "INFO")
+        except:
+            pass
+        
+        pause_on_windows(f"更新失败：{e}\n\n详细信息已记录到日志\n按任意键退出...")
         sys.exit(1)
 
 

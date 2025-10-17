@@ -857,78 +857,133 @@ class AutoUpdater:
         current_exe = sys.executable
         current_pid = os.getpid()
         
-        # 创建Windows批处理脚本，直接处理已下载的文件
+        # 创建Windows批处理脚本，直接处理已下载的文件（调试模式）
         batch_script = os.path.join(tempfile.gettempdir(), 'install_update.bat')
         batch_content = f'''@echo off
 setlocal enabledelayedexpansion
 chcp 65001 >nul 2>&1
 
-echo [更新器] 准备安装更新...
+echo ========================================
+echo [更新器调试模式] 准备安装更新
+echo ========================================
+echo [DEBUG] 更新文件: {update_file}
+echo [DEBUG] 目标文件: {current_exe}
+echo [DEBUG] 主程序PID: {current_pid}
+echo.
 
 REM 等待主程序退出
+echo [步骤1/5] 等待主程序退出...
 taskkill /PID {current_pid} /F >nul 2>&1
 timeout /t 3 /nobreak >nul
 
+REM 验证更新文件存在
+if not exist "{update_file}" (
+    echo [ERROR] 更新文件不存在: {update_file}
+    echo.
+    pause
+    exit /b 1
+)
+echo [DEBUG] 更新文件大小: 
+dir "{update_file}" | find "{os.path.basename(update_file)}"
+
 REM 备份当前文件
+echo [步骤2/5] 创建备份...
 if exist "{current_exe}" (
-    echo [更新器] 创建备份...
     copy /y "{current_exe}" "{current_exe}.backup" >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] 备份失败
+        pause
+        exit /b 1
+    )
+    echo [DEBUG] 备份成功
+) else (
+    echo [WARNING] 目标文件不存在
 )
 
 REM 替换文件（多种策略）
-echo [更新器] 正在更新程序...
+echo [步骤3/5] 替换程序文件...
 set /a retry=0
 :retry_replace
-if !retry! geq 10 goto failed
+if !retry! geq 30 goto failed
+
+echo [DEBUG] 尝试第 !retry!/30 次替换...
 
 REM 尝试直接移动
 move /y "{update_file}" "{current_exe}" >nul 2>&1
-if not errorlevel 1 goto success
+if not errorlevel 1 (
+    echo [DEBUG] 移动策略成功
+    goto verify_success
+)
 
 REM 尝试删除后复制
 del /f /q "{current_exe}" >nul 2>&1
 timeout /t 1 /nobreak >nul
 copy /y "{update_file}" "{current_exe}" >nul 2>&1
 if not errorlevel 1 (
+    echo [DEBUG] 删除-复制策略成功
     del /f /q "{update_file}" >nul 2>&1
-    goto success
+    goto verify_success
 )
 
 set /a retry+=1
-timeout /t 1 /nobreak >nul
-goto retry_replace
+if !retry! lss 30 (
+    timeout /t 1 /nobreak >nul
+    goto retry_replace
+)
 
 :failed
-echo [更新器] 更新失败，恢复备份...
+echo ========================================
+echo [ERROR] 更新失败，恢复备份
+echo ========================================
 if exist "{current_exe}.backup" (
     copy /y "{current_exe}.backup" "{current_exe}" >nul 2>&1
+    echo [DEBUG] 已恢复备份文件
 )
+echo.
+pause
 exit /b 1
 
-:success
-echo [更新器] 更新成功！
-REM 清理备份
-if exist "{current_exe}.backup" del /f /q "{current_exe}.backup" >nul 2>&1
-
-if "{str(restart)}"=="True" (
-    echo [更新器] 重启程序...
-    start "" "{current_exe}"
+:verify_success
+echo [步骤4/5] 验证更新...
+if exist "{current_exe}" (
+    echo [DEBUG] 目标文件存在
+    dir "{current_exe}" | find "{os.path.basename(current_exe)}"
+) else (
+    echo [ERROR] 目标文件不存在
+    goto failed
 )
 
+:success
+echo [步骤5/5] 清理备份...
+if exist "{current_exe}.backup" del /f /q "{current_exe}.backup" >nul 2>&1
+echo ========================================
+echo [SUCCESS] 更新成功！
+echo ========================================
+echo.
+
+if "{str(restart)}"=="True" (
+    echo [步骤6/6] 重启程序...
+    start "" "{current_exe}"
+    timeout /t 2 /nobreak >nul
+)
+
+echo 更新完成，窗口将在5秒后自动关闭...
+echo 或按任意键立即关闭
+timeout /t 5
 exit /b 0
 '''
         
         with open(batch_script, 'w', encoding='gbk') as f:
             f.write(batch_content)
         
-        # 启动批处理脚本
-        # 不使用CREATE_NO_WINDOW，让用户能看到更新过程
-        DETACHED_PROCESS = 0x00000008
-        creationflags = DETACHED_PROCESS
+        # 启动批处理脚本（显示窗口以便调试）
+        # 使用CREATE_NEW_CONSOLE创建新控制台窗口
+        CREATE_NEW_CONSOLE = 0x00000010
+        creationflags = CREATE_NEW_CONSOLE
         subprocess.Popen(['cmd', '/c', batch_script], creationflags=creationflags)
         
         # 通知并退出
-        self._notify_callbacks('install_progress', '外部安装程序已启动，应用将退出以完成更新...')
+        self._notify_callbacks('install_progress', '外部安装程序已启动（调试窗口），应用将退出以完成更新...')
         self._terminate_current_process(delay=0.5)
     
     def _start_force_update(self, update_info: Dict[str, Any]) -> None:
@@ -959,9 +1014,9 @@ exit /b 0
                 args = [sys.executable, script_path, update_info_json, target_exe, str(current_pid)]
                 
                 if sys.platform == 'win32':
-                    # 不使用CREATE_NO_WINDOW，让用户能看到更新过程
-                    DETACHED_PROCESS = 0x00000008
-                    creationflags = DETACHED_PROCESS
+                    # 使用CREATE_NEW_CONSOLE显示调试窗口
+                    CREATE_NEW_CONSOLE = 0x00000010
+                    creationflags = CREATE_NEW_CONSOLE
                     subprocess.Popen(args, creationflags=creationflags)
                 else:
                     subprocess.Popen(args)
@@ -1247,14 +1302,14 @@ exit /b 0
         with open(batch_script, 'w', encoding='gbk') as f:
             f.write(batch_content)
         
-        # 启动批处理脚本
+        # 启动批处理脚本（显示窗口以便调试）
         if sys.platform == 'win32':
-            # 不使用CREATE_NO_WINDOW，让用户能看到更新过程
-            DETACHED_PROCESS = 0x00000008
-            creationflags = DETACHED_PROCESS
+            # 使用CREATE_NEW_CONSOLE显示调试窗口
+            CREATE_NEW_CONSOLE = 0x00000010
+            creationflags = CREATE_NEW_CONSOLE
             subprocess.Popen(['cmd', '/c', batch_script], creationflags=creationflags)
         
-        self._notify_callbacks('install_progress', '外部更新程序已启动，应用将退出以完成更新...')
+        self._notify_callbacks('install_progress', '外部更新程序已启动（调试窗口），应用将退出以完成更新...')
 
     def _install_windows_exe(self, exe_path: str, restart: bool):
         """安装Windows可执行文件（使用外部更新机制）"""
@@ -1295,12 +1350,12 @@ exit /b 0
             with open(helper_path, 'w', encoding='gbk') as f:
                 f.write(helper_script)
             
-            # 不使用CREATE_NO_WINDOW，让用户能看到更新过程
-            DETACHED_PROCESS = 0x00000008
-            creationflags = DETACHED_PROCESS
+            # 使用CREATE_NEW_CONSOLE显示调试窗口
+            CREATE_NEW_CONSOLE = 0x00000010
+            creationflags = CREATE_NEW_CONSOLE
             subprocess.Popen(['cmd', '/c', helper_path], creationflags=creationflags)
             
-            self._notify_callbacks('install_progress', '更新程序已启动，应用将退出...')
+            self._notify_callbacks('install_progress', '更新程序已启动（调试窗口），应用将退出...')
             self._terminate_current_process(delay=0.5)
     
     def _install_from_zip(self, zip_path: str, restart: bool):

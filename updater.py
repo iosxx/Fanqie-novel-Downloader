@@ -17,6 +17,18 @@ import importlib
 from typing import Optional, Dict, Any, Callable
 from datetime import datetime, timedelta
 
+# 平台特定的模块导入
+if sys.platform == 'win32':
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
+else:
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
+
 # 延迟导入第三方依赖，避免模块导入失败
 _requests = None
 _packaging_version = None
@@ -59,6 +71,170 @@ try:
     import config as app_meta
 except Exception:
     app_meta = None
+
+
+class UpdateLock:
+    """更新进程锁，防止多个更新进程同时运行"""
+    
+    def __init__(self):
+        self.lock_file = os.path.join(tempfile.gettempdir(), 'tomato_novel_updater.lock')
+        self.lock_handle = None
+        self.locked = False
+        
+    def acquire(self, timeout: int = 10) -> bool:
+        """获取锁（非阻塞，带超时）"""
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                # 尝试打开或创建锁文件
+                self.lock_handle = open(self.lock_file, 'w')
+                
+                if sys.platform == 'win32':
+                    # Windows: 使用msvcrt文件锁
+                    import msvcrt
+                    try:
+                        # 尝试获取独占锁（非阻塞）
+                        msvcrt.locking(self.lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        # 写入进程信息
+                        self.lock_handle.write(f"{os.getpid()}\n{time.time()}")
+                        self.lock_handle.flush()
+                        self.locked = True
+                        return True
+                    except IOError:
+                        # 锁被占用，等待后重试
+                        self.lock_handle.close()
+                        self.lock_handle = None
+                else:
+                    # Unix/Linux/macOS: 使用fcntl文件锁
+                    import fcntl
+                    try:
+                        # 尝试获取独占锁（非阻塞）
+                        fcntl.flock(self.lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        # 写入进程信息
+                        self.lock_handle.write(f"{os.getpid()}\n{time.time()}")
+                        self.lock_handle.flush()
+                        self.locked = True
+                        return True
+                    except (IOError, BlockingIOError):
+                        # 锁被占用，等待后重试
+                        self.lock_handle.close()
+                        self.lock_handle = None
+                        
+            except Exception as e:
+                print(f"获取更新锁失败: {e}")
+                if self.lock_handle:
+                    try:
+                        self.lock_handle.close()
+                    except:
+                        pass
+                    self.lock_handle = None
+                    
+            # 等待一小段时间后重试
+            time.sleep(0.5)
+            
+        return False
+        
+    def release(self):
+        """释放锁"""
+        if self.locked and self.lock_handle:
+            try:
+                if sys.platform == 'win32':
+                    import msvcrt
+                    try:
+                        # Windows: 解锁文件
+                        msvcrt.locking(self.lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    except:
+                        pass
+                else:
+                    import fcntl
+                    try:
+                        # Unix: 解锁文件
+                        fcntl.flock(self.lock_handle.fileno(), fcntl.LOCK_UN)
+                    except:
+                        pass
+                        
+                self.lock_handle.close()
+                self.lock_handle = None
+                self.locked = False
+                
+                # 尝试删除锁文件
+                try:
+                    os.remove(self.lock_file)
+                except:
+                    pass
+                    
+            except Exception as e:
+                print(f"释放更新锁失败: {e}")
+                
+    def is_locked(self) -> bool:
+        """检查是否有其他进程持有锁"""
+        try:
+            # 尝试读取锁文件
+            if os.path.exists(self.lock_file):
+                try:
+                    with open(self.lock_file, 'r') as f:
+                        lines = f.readlines()
+                        if lines:
+                            pid = int(lines[0].strip())
+                            lock_time = float(lines[1].strip()) if len(lines) > 1 else 0
+                            
+                            # 检查锁是否过期（超过5分钟）
+                            if time.time() - lock_time > 300:
+                                # 锁已过期，尝试删除
+                                try:
+                                    os.remove(self.lock_file)
+                                except:
+                                    pass
+                                return False
+                                
+                            # 检查持有锁的进程是否还在运行
+                            if sys.platform == 'win32':
+                                import ctypes
+                                kernel32 = ctypes.windll.kernel32
+                                SYNCHRONIZE = 0x00100000
+                                process = kernel32.OpenProcess(SYNCHRONIZE, 0, pid)
+                                if process == 0:
+                                    # 进程不存在，锁无效
+                                    try:
+                                        os.remove(self.lock_file)
+                                    except:
+                                        pass
+                                    return False
+                                kernel32.CloseHandle(process)
+                            else:
+                                try:
+                                    os.kill(pid, 0)
+                                except (OSError, ProcessLookupError):
+                                    # 进程不存在，锁无效
+                                    try:
+                                        os.remove(self.lock_file)
+                                    except:
+                                        pass
+                                    return False
+                                    
+                            return True
+                except Exception:
+                    # 读取失败，认为没有锁
+                    return False
+            return False
+        except Exception:
+            return False
+            
+    def __enter__(self):
+        """上下文管理器入口"""
+        if not self.acquire():
+            raise RuntimeError("无法获取更新锁，可能有其他更新正在进行")
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """上下文管理器出口"""
+        self.release()
+        
+    def __del__(self):
+        """析构函数，确保锁被释放"""
+        if self.locked:
+            self.release()
 
 
 def is_official_release_build() -> bool:
@@ -132,10 +308,12 @@ class UpdateChecker:
                 'body': release_data['body'],
                 'published_at': release_data['published_at'],
                 'html_url': release_data['html_url'],
-                'assets': []
+                'assets': [],
+                'checksums': {}  # 存储SHA256校验值
             }
             
-            # 解析下载链接
+            # 解析下载链接和校验文件
+            checksum_asset = None
             for asset in release_data.get('assets', []):
                 asset_info = {
                     'name': asset['name'],
@@ -144,6 +322,37 @@ class UpdateChecker:
                     'content_type': asset['content_type']
                 }
                 release_info['assets'].append(asset_info)
+                
+                # 查找SHA256校验文件（通常名为checksums.txt或SHA256SUMS）
+                if any(x in asset['name'].lower() for x in ['checksum', 'sha256', 'hash']):
+                    checksum_asset = asset
+            
+            # 尝试下载并解析校验文件
+            if checksum_asset:
+                try:
+                    checksum_response = requests.get(
+                        checksum_asset['browser_download_url'], 
+                        headers=headers, 
+                        timeout=10
+                    )
+                    checksum_response.raise_for_status()
+                    checksum_text = checksum_response.text
+                    
+                    # 解析校验文件（格式：SHA256 filename）
+                    for line in checksum_text.strip().split('\n'):
+                        if line.strip():
+                            parts = line.strip().split()
+                            if len(parts) >= 2:
+                                # 支持两种格式：'hash filename' 或 'hash *filename'
+                                hash_value = parts[0].lower()
+                                filename = parts[-1].lstrip('*')
+                                release_info['checksums'][filename] = hash_value
+                except Exception as e:
+                    print(f"下载校验文件失败: {e}")
+            
+            # 尝试从release body中提取SHA256（如果没有单独的校验文件）
+            if not release_info['checksums'] and release_data.get('body'):
+                self._extract_checksums_from_body(release_data['body'], release_info['checksums'])
             
             # 更新缓存
             self.cached_release = release_info
@@ -158,6 +367,51 @@ class UpdateChecker:
             # 捕获所有异常（包括 requests.exceptions.RequestException）
             print(f"检查更新失败: {e}")
             return None
+    
+    def _extract_checksums_from_body(self, body: str, checksums: Dict[str, str]):
+        """从release body中提取SHA256校验值"""
+        import re
+        # 匹配SHA256格式：SHA256 (filename) = hash 或 filename: hash
+        patterns = [
+            r'SHA256\s*\(([^)]+)\)\s*=\s*([a-fA-F0-9]{64})',  # SHA256 (file) = hash
+            r'([^\s:]+(?:\.exe|\.zip|\.tar\.gz|\.dmg|\.AppImage))\s*:\s*([a-fA-F0-9]{64})',  # file: hash
+            r'([a-fA-F0-9]{64})\s+\*?([^\s]+(?:\.exe|\.zip|\.tar\.gz|\.dmg|\.AppImage))'  # hash file
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, body)
+            for match in matches:
+                if len(match) == 2:
+                    # 根据匹配模式确定文件名和哈希值的位置
+                    if pattern.startswith(r'([a-fA-F0-9]{64})'):
+                        hash_value, filename = match
+                    else:
+                        filename, hash_value = match
+                    checksums[filename.strip()] = hash_value.strip().lower()
+    
+    def verify_file_checksum(self, filepath: str, expected_hash: str) -> bool:
+        """验证文件的SHA256校验值"""
+        import hashlib
+        try:
+            sha256 = hashlib.sha256()
+            with open(filepath, 'rb') as f:
+                while chunk := f.read(8192):
+                    sha256.update(chunk)
+            
+            actual_hash = sha256.hexdigest().lower()
+            expected_hash = expected_hash.lower()
+            
+            if actual_hash != expected_hash:
+                print(f"SHA256校验失败:")
+                print(f"  预期: {expected_hash}")
+                print(f"  实际: {actual_hash}")
+                return False
+            
+            print(f"SHA256校验通过: {os.path.basename(filepath)}")
+            return True
+        except Exception as e:
+            print(f"计算文件SHA256失败: {e}")
+            return False
     
     def has_update(self, force_check: bool = False, force: Optional[bool] = None) -> bool:
         """
@@ -416,6 +670,17 @@ class AutoUpdater:
         if self.is_downloading:
             return None
         
+        # 检查更新锁
+        update_lock = UpdateLock()
+        if update_lock.is_locked():
+            self._notify_callbacks('download_error', '另一个更新进程正在运行，请稍后重试')
+            print("另一个更新进程正在运行，请稍后重试")
+            return None
+            
+        if not update_lock.acquire(timeout=5):
+            self._notify_callbacks('download_error', '无法获取更新锁，可能有其他更新正在进行')
+            return None
+        
         self.is_downloading = True
         self._notify_callbacks('download_start', update_info)
         
@@ -462,9 +727,26 @@ class AutoUpdater:
                                       if self.download_total > 0 else 0
                         })
             
-            # 简单完整性校验（如有Content-Length）
+            # 文件大小校验
             if self.download_total > 0 and os.path.getsize(file_path) != self.download_total:
                 raise Exception("下载文件大小与预期不一致")
+            
+            # SHA256校验（如果有校验值）
+            if update_info.get('checksums'):
+                expected_hash = update_info['checksums'].get(asset['name'])
+                if expected_hash:
+                    self._notify_callbacks('download_progress', {
+                        'status': 'verifying',
+                        'message': '正在验证文件完整性...'
+                    })
+                    
+                    if not self.checker.verify_file_checksum(file_path, expected_hash):
+                        os.remove(file_path)  # 删除损坏的文件
+                        raise Exception("文件SHA256校验失败，可能文件已损坏")
+                    
+                    print(f"文件完整性验证通过")
+                else:
+                    print(f"警告：未找到文件 {asset['name']} 的SHA256校验值")
 
             self._notify_callbacks('download_complete', file_path)
             return file_path
@@ -480,6 +762,8 @@ class AutoUpdater:
             return None
         finally:
             self.is_downloading = False
+            # 释放更新锁
+            update_lock.release()
     
     def install_update(self, update_file: str, restart: bool = True) -> bool:
         """

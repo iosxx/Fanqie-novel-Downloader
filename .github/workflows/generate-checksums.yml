@@ -1,0 +1,147 @@
+name: Generate SHA256 Checksums
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag to generate checksums for'
+        required: true
+        type: string
+
+jobs:
+  generate-checksums:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Get release
+      id: get_release
+      uses: actions/github-script@v7
+      with:
+        script: |
+          let tag = context.payload.release?.tag_name || '${{ github.event.inputs.tag_name }}';
+          
+          // 获取release信息
+          const release = await github.rest.repos.getReleaseByTag({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            tag: tag
+          });
+          
+          // 设置输出
+          core.setOutput('release_id', release.data.id);
+          core.setOutput('tag_name', tag);
+          core.setOutput('upload_url', release.data.upload_url);
+          
+          // 获取所有资产
+          const assets = release.data.assets.map(asset => ({
+            name: asset.name,
+            url: asset.browser_download_url
+          }));
+          
+          core.setOutput('assets', JSON.stringify(assets));
+          return release.data;
+
+    - name: Download release assets
+      run: |
+        mkdir -p release-assets
+        assets='${{ steps.get_release.outputs.assets }}'
+        
+        # 下载所有发布文件
+        echo "$assets" | jq -r '.[] | "\(.name) \(.url)"' | while read name url; do
+          echo "Downloading $name..."
+          curl -L "$url" -o "release-assets/$name"
+        done
+
+    - name: Generate checksums
+      id: generate_checksums
+      run: |
+        cd release-assets
+        
+        # 生成SHA256校验文件
+        echo "# SHA256 Checksums for Release ${{ steps.get_release.outputs.tag_name }}" > SHA256SUMS.txt
+        echo "# Generated on $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> SHA256SUMS.txt
+        echo "" >> SHA256SUMS.txt
+        
+        # 计算每个文件的SHA256
+        for file in *; do
+          if [ -f "$file" ] && [ "$file" != "SHA256SUMS.txt" ] && [ "$file" != "checksums.txt" ]; then
+            sha256sum "$file" >> SHA256SUMS.txt
+          fi
+        done
+        
+        # 同时创建checksums.txt（兼容旧格式）
+        cp SHA256SUMS.txt checksums.txt
+        
+        echo "Generated checksums:"
+        cat SHA256SUMS.txt
+
+    - name: Upload checksums to release
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          
+          const releaseId = ${{ steps.get_release.outputs.release_id }};
+          
+          // 上传SHA256SUMS.txt
+          const sha256Content = fs.readFileSync('release-assets/SHA256SUMS.txt');
+          await github.rest.repos.uploadReleaseAsset({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            release_id: releaseId,
+            name: 'SHA256SUMS.txt',
+            data: sha256Content
+          });
+          
+          // 上传checksums.txt（兼容）
+          await github.rest.repos.uploadReleaseAsset({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            release_id: releaseId,
+            name: 'checksums.txt',
+            data: sha256Content
+          });
+          
+          console.log('Checksums uploaded successfully!');
+
+    - name: Update release body
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          
+          // 读取校验文件
+          const checksums = fs.readFileSync('release-assets/SHA256SUMS.txt', 'utf8');
+          
+          // 获取当前release body
+          const release = await github.rest.repos.getRelease({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            release_id: ${{ steps.get_release.outputs.release_id }}
+          });
+          
+          let body = release.data.body || '';
+          
+          // 检查是否已有校验值部分
+          if (!body.includes('## SHA256 Checksums')) {
+            // 添加校验值部分
+            body += '\n\n## SHA256 Checksums\n\n```\n' + checksums + '\n```';
+            
+            // 更新release body
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ steps.get_release.outputs.release_id }},
+              body: body
+            });
+            
+            console.log('Release body updated with checksums!');
+          } else {
+            console.log('Checksums already present in release body, skipping update.');
+          }

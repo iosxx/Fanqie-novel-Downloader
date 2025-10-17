@@ -297,54 +297,159 @@ class MultiThreadDownloader:
             return False
 
 
+def verify_file_checksum(filepath: str, expected_hash: str) -> bool:
+    """验证文件的SHA256校验值"""
+    import hashlib
+    try:
+        sha256 = hashlib.sha256()
+        with open(filepath, 'rb') as f:
+            while chunk := f.read(8192):
+                sha256.update(chunk)
+        
+        actual_hash = sha256.hexdigest().lower()
+        expected_hash = expected_hash.lower()
+        
+        if actual_hash != expected_hash:
+            log_message(f"SHA256校验失败:", "ERROR")
+            log_message(f"  预期: {expected_hash}", "ERROR")
+            log_message(f"  实际: {actual_hash}", "ERROR")
+            return False
+        
+        log_message(f"SHA256校验通过: {os.path.basename(filepath)}")
+        return True
+    except Exception as e:
+        log_message(f"计算文件SHA256失败: {e}", "WARNING")
+        return True  # 如果无法计算，跳过校验
+
+
 def download_update_file(update_info):
     """下载更新文件（优先多线程分段）。"""
-    try:
-        log_message("开始下载更新文件...")
+    max_retries = 3
+    retry_delay = 5
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                log_message(f"第 {attempt + 1} 次重试下载...")
+                time.sleep(retry_delay)
+                
+            log_message("开始下载更新文件...")
 
-        # 创建更新器实例，仅用于选择资产
-        updater = AutoUpdater(__github_repo__, __version__)
+            # 创建更新器实例，仅用于选择资产
+            updater = AutoUpdater(__github_repo__, __version__)
 
-        # 选择合适的下载资源
-        asset = updater._get_platform_asset(update_info['assets'])
-        if not asset:
-            log_message("没有找到适合当前平台的更新文件", "ERROR")
-            return None
+            # 选择合适的下载资源
+            asset = updater._get_platform_asset(update_info['assets'])
+            if not asset:
+                log_message("没有找到适合当前平台的更新文件", "ERROR")
+                return None
 
-        log_message(f"选择下载文件: {asset['name']}")
+            log_message(f"选择下载文件: {asset['name']}")
 
-        # 创建临时文件
-        temp_dir = tempfile.gettempdir()
-        file_path = os.path.join(temp_dir, asset['name'])
+            # 创建临时文件
+            temp_dir = tempfile.gettempdir()
+            file_path = os.path.join(temp_dir, asset['name'])
+            
+            # 如果文件已存在且大小正确，可能是之前下载的，验证后直接使用
+            if os.path.exists(file_path):
+                expected_size = asset.get('size', 0)
+                if expected_size > 0 and os.path.getsize(file_path) == expected_size:
+                    log_message(f"发现已存在的文件，验证中...")
+                    # 验证SHA256（如果有）
+                    expected_hash = update_info.get('checksums', {}).get(asset['name'])
+                    if expected_hash:
+                        if verify_file_checksum(file_path, expected_hash):
+                            log_message(f"使用已存在的文件: {file_path}")
+                            return file_path
+                        else:
+                            log_message(f"已存在文件校验失败，重新下载")
+                            os.remove(file_path)
+                    else:
+                        log_message(f"使用已存在的文件（无校验值）: {file_path}")
+                        return file_path
 
-        # 下载文件（带 Range 支持）
-        headers = {
-            'User-Agent': 'Tomato-Novel-Downloader',
-            'Accept': 'application/octet-stream'
-        }
-        token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
-        if token:
-            headers['Authorization'] = f'Bearer {token}'
+            # 下载文件（带 Range 支持）
+            headers = {
+                'User-Agent': 'Tomato-Novel-Downloader',
+                'Accept': 'application/octet-stream'
+            }
+            token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
+            if token:
+                headers['Authorization'] = f'Bearer {token}'
 
-        dl = MultiThreadDownloader(asset['download_url'], file_path, headers=headers, threads=min(8, max(4, (os.cpu_count() or 4))))
-        ok = dl.download()
-        if not ok:
-            log_message("多线程下载失败，回退单线程...", "WARNING")
-            # 回退单线程
-            requests = _get_requests()
-            with requests.get(asset['download_url'], headers=headers, stream=True, timeout=60) as resp:
-                resp.raise_for_status()
-                with open(file_path, 'wb') as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
+            # 首次尝试多线程下载
+            if attempt == 0:
+                dl = MultiThreadDownloader(asset['download_url'], file_path, headers=headers, 
+                                         threads=min(8, max(4, (os.cpu_count() or 4))))
+                ok = dl.download()
+                if not ok:
+                    log_message("多线程下载失败，回退单线程...", "WARNING")
+                    # 回退单线程
+                    requests = _get_requests()
+                    with requests.get(asset['download_url'], headers=headers, stream=True, timeout=60) as resp:
+                        resp.raise_for_status()
+                        total_size = int(resp.headers.get('content-length', 0))
+                        downloaded = 0
+                        
+                        with open(file_path, 'wb') as f:
+                            for chunk in resp.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    # 显示进度
+                                    if total_size > 0:
+                                        percent = (downloaded / total_size) * 100
+                                        if int(percent) % 10 == 0:
+                                            log_message(f"下载进度: {percent:.1f}%")
+            else:
+                # 重试时直接使用单线程下载
+                requests = _get_requests()
+                with requests.get(asset['download_url'], headers=headers, stream=True, timeout=90) as resp:
+                    resp.raise_for_status()
+                    with open(file_path, 'wb') as f:
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+            
+            # 验证文件大小
+            expected_size = asset.get('size', 0)
+            actual_size = os.path.getsize(file_path)
+            if expected_size > 0 and actual_size != expected_size:
+                log_message(f"文件大小不匹配: 预期 {expected_size}, 实际 {actual_size}", "ERROR")
+                os.remove(file_path)
+                if attempt < max_retries - 1:
+                    continue
+                return None
+            
+            # SHA256校验（如果有校验值）
+            expected_hash = update_info.get('checksums', {}).get(asset['name'])
+            if expected_hash:
+                log_message("正在验证文件完整性...")
+                if not verify_file_checksum(file_path, expected_hash):
+                    os.remove(file_path)
+                    if attempt < max_retries - 1:
+                        log_message("文件校验失败，准备重试...")
+                        continue
+                    return None
+                log_message("文件完整性验证通过")
+            
+            log_message(f"下载完成: {file_path}")
+            return file_path
 
-        log_message(f"下载完成: {file_path}")
-        return file_path
-
-    except Exception as e:
-        log_message(f"下载失败: {e}", "ERROR")
-        return None
+        except Exception as e:
+            log_message(f"下载失败 (尝试 {attempt + 1}/{max_retries}): {e}", "ERROR")
+            # 清理可能损坏的文件
+            if 'file_path' in locals() and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+            
+            if attempt >= max_retries - 1:
+                log_message("下载失败次数过多，放弃下载", "ERROR")
+                return None
+    
+    return None
 
 
 def install_update_windows(update_file):
@@ -440,50 +545,151 @@ def install_update_windows(update_file):
         return False
 
 
+def detect_platform_details():
+    """检测详细的平台信息"""
+    system = platform.system()
+    machine = platform.machine().lower()
+    
+    details = {
+        'system': system,
+        'machine': machine,
+        'is_mac': system == 'Darwin',
+        'is_linux': system == 'Linux',
+        'is_arm': 'arm' in machine or 'aarch' in machine,
+        'is_x86': 'x86' in machine or 'i686' in machine or 'amd64' in machine
+    }
+    
+    # 检测是否在容器中运行
+    if system == 'Linux':
+        details['is_container'] = (
+            os.path.exists('/.dockerenv') or 
+            os.path.exists('/run/.containerenv') or
+            os.environ.get('KUBERNETES_SERVICE_HOST') is not None
+        )
+    
+    return details
+
+
 def install_update_unix(update_file):
     """Unix 平台安装更新"""
     backup_path = None
     temp_extract_dir = None
+    
     try:
         current_exe = get_current_exe_path()
         current_dir = os.path.dirname(current_exe)
-        log_message("开始安装更新 (Unix)...")
+        
+        # 获取平台详情
+        platform_info = detect_platform_details()
+        log_message(f"开始安装更新 ({platform_info['system']}/{platform_info['machine']})...")
+        
+        # 检查写权限
+        if not os.access(current_dir, os.W_OK):
+            log_message(f"警告：当前目录没有写权限: {current_dir}", "WARNING")
+            # 尝试获取权限或提示用户
+            if platform_info['is_mac']:
+                log_message("macOS: 请确保应用有正确的权限", "WARNING")
+            elif platform_info['is_linux']:
+                log_message("Linux: 可能需要使用sudo权限运行", "WARNING")
 
         # 如果是压缩包，解压到临时目录
         if update_file.endswith('.zip'):
             import zipfile
             temp_extract_dir = os.path.join(tempfile.gettempdir(), 'update_extract')
+            # 清理旧的解压目录
+            if os.path.exists(temp_extract_dir):
+                try:
+                    shutil.rmtree(temp_extract_dir)
+                except:
+                    pass
             os.makedirs(temp_extract_dir, exist_ok=True)
 
             log_message("解压更新文件...")
-            with zipfile.ZipFile(update_file, 'r') as zip_ref:
-                zip_ref.extractall(temp_extract_dir)
+            try:
+                with zipfile.ZipFile(update_file, 'r') as zip_ref:
+                    # 获取所有文件列表
+                    file_list = zip_ref.namelist()
+                    log_message(f"压缩包包含 {len(file_list)} 个文件")
+                    zip_ref.extractall(temp_extract_dir)
+            except Exception as e:
+                log_message(f"解压失败: {e}", "ERROR")
+                return False
+                
         elif update_file.endswith('.tar.gz') or update_file.endswith('.tgz'):
             import tarfile
             temp_extract_dir = os.path.join(tempfile.gettempdir(), 'update_extract')
+            # 清理旧的解压目录
+            if os.path.exists(temp_extract_dir):
+                try:
+                    shutil.rmtree(temp_extract_dir)
+                except:
+                    pass
             os.makedirs(temp_extract_dir, exist_ok=True)
+            
             log_message("解压tarball更新文件...")
-            with tarfile.open(update_file, 'r:gz') as tar:
-                tar.extractall(temp_extract_dir)
+            try:
+                with tarfile.open(update_file, 'r:gz') as tar:
+                    # 安全解压（避免路径遍历攻击）
+                    members = tar.getmembers()
+                    safe_members = []
+                    for member in members:
+                        if member.name.startswith('/') or '..' in member.name:
+                            log_message(f"跳过不安全的路径: {member.name}", "WARNING")
+                            continue
+                        safe_members.append(member)
+                    log_message(f"压缩包包含 {len(safe_members)} 个文件")
+                    tar.extractall(temp_extract_dir, members=safe_members)
+            except Exception as e:
+                log_message(f"解压失败: {e}", "ERROR")
+                return False
+                
         elif update_file.lower().endswith('.appimage'):
             # AppImage 单文件直接覆盖
             temp_extract_dir = None
+            log_message("检测到AppImage文件")
+        elif update_file.lower().endswith('.dmg'):
+            # macOS DMG文件需要特殊处理
+            log_message("DMG文件需要手动安装", "ERROR")
+            return False
         else:
+            # 可能是直接的可执行文件
             temp_extract_dir = None
+            log_message(f"直接使用文件: {update_file}")
 
         update_exe = update_file
         if temp_extract_dir:
-            # 查找主要可执行文件（使用当前可执行文件名匹配）
+            # 查找主要可执行文件
             exe_name = os.path.basename(current_exe)
             candidates = []
+            
+            # 优先查找相同名称的文件
             for root, dirs, files in os.walk(temp_extract_dir):
+                # 跳过隐藏目录
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                
                 for file in files:
-                    if file == exe_name or exe_name in file:
-                        candidates.append(os.path.join(root, file))
+                    file_path = os.path.join(root, file)
+                    # 完全匹配
+                    if file == exe_name:
+                        candidates.insert(0, file_path)
+                    # 部分匹配或可执行文件
+                    elif (exe_name.lower() in file.lower() or 
+                          file.lower().endswith(('.appimage', '.app')) or
+                          (os.access(file_path, os.X_OK) and not file.startswith('.'))):
+                        candidates.append(file_path)
+            
             if not candidates:
                 log_message("未找到匹配的可执行文件", "ERROR")
+                # 列出找到的文件以供调试
+                log_message(f"解压目录内容:", "DEBUG")
+                for root, dirs, files in os.walk(temp_extract_dir):
+                    for file in files[:10]:  # 只列出前10个文件
+                        log_message(f"  - {os.path.join(root, file)}", "DEBUG")
                 return False
+                
+            # 选择最可能的候选文件
             update_exe = candidates[0]
+            log_message(f"选择更新文件: {update_exe}")
 
         # 备份当前文件
         backup_path = backup_current_exe()
@@ -494,25 +700,47 @@ def install_update_unix(update_file):
         # 替换文件（带重试机制）
         log_message(f"替换文件: {current_exe}")
         success = False
+        max_attempts = 10
         
-        for attempt in range(5):
+        for attempt in range(max_attempts):
             try:
+                # 确保源文件存在且可读
+                if not os.path.exists(update_exe):
+                    raise FileNotFoundError(f"源文件不存在: {update_exe}")
+                if not os.access(update_exe, os.R_OK):
+                    raise PermissionError(f"无法读取源文件: {update_exe}")
+                
+                # 尝试复制文件
                 shutil.copy2(update_exe, current_exe)
-                success = True
-                break
+                
+                # 验证复制是否成功
+                if os.path.exists(current_exe):
+                    success = True
+                    break
+            except PermissionError as e:
+                if attempt == 0:
+                    log_message(f"权限错误，尝试修改权限: {e}")
+                    try:
+                        # 尝试修改目标文件权限
+                        if os.path.exists(current_exe):
+                            os.chmod(current_exe, 0o755)
+                    except:
+                        pass
+                time.sleep(0.5 * (1.5 ** (attempt // 3)))  # 指数退避
             except Exception as e:
                 if attempt == 0:
                     log_message(f"文件替换失败，重试中: {e}")
                 time.sleep(0.5)
         
         if not success:
-            log_message("文件替换失败", "ERROR")
+            log_message(f"文件替换失败（尝试 {max_attempts} 次）", "ERROR")
             restore_backup(backup_path)
             return False
 
         # 设置可执行权限
         try:
             os.chmod(current_exe, 0o755)
+            log_message("已设置可执行权限")
         except Exception as e:
             log_message(f"设置可执行权限失败: {e}", "WARNING")
 
@@ -571,6 +799,105 @@ def pause_on_windows(message="按任意键继续..."):
             time.sleep(5)
 
 
+def check_permissions():
+    """检查是否有足够的权限进行更新"""
+    current_exe = get_current_exe_path()
+    current_dir = os.path.dirname(current_exe)
+    
+    # 检查目录写权限
+    if not os.access(current_dir, os.W_OK):
+        log_message(f"警告：没有写权限: {current_dir}", "WARNING")
+        return False
+    
+    # 检查文件替换权限
+    if os.path.exists(current_exe):
+        # 尝试以追加模式打开文件（不会修改内容）
+        try:
+            with open(current_exe, 'a'):
+                pass
+            return True
+        except (IOError, PermissionError):
+            log_message(f"警告：无法修改文件: {current_exe}", "WARNING")
+            return False
+    
+    return True
+
+
+def request_elevation():
+    """请求管理员权限（Windows）或sudo权限（Unix）"""
+    system = platform.system()
+    
+    if system == 'Windows':
+        import ctypes
+        # 检查是否已经有管理员权限
+        try:
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except:
+            is_admin = False
+            
+        if not is_admin:
+            log_message("需要管理员权限，尝试提权...")
+            # 以管理员权限重新启动
+            try:
+                # 获取Python解释器路径
+                python_exe = sys.executable
+                # 构建命令行参数
+                params = ' '.join(['"{}"'.format(arg) for arg in sys.argv])
+                
+                # 使用ShellExecute请求提权
+                ret = ctypes.windll.shell32.ShellExecuteW(
+                    None, 
+                    "runas",  # 请求管理员权限
+                    python_exe,
+                    params,
+                    None,
+                    1  # SW_SHOWNORMAL
+                )
+                
+                if ret > 32:  # 成功
+                    log_message("已请求管理员权限，新进程启动")
+                    sys.exit(0)  # 退出当前进程
+                else:
+                    log_message("用户拒绝了管理员权限请求", "ERROR")
+                    return False
+            except Exception as e:
+                log_message(f"请求管理员权限失败: {e}", "ERROR")
+                return False
+        else:
+            log_message("已有管理员权限")
+            return True
+            
+    elif system in ['Linux', 'Darwin']:
+        # 检查是否是root用户
+        if os.geteuid() != 0:
+            log_message("需要root权限，尝试使用sudo...")
+            # 尝试使用sudo重新运行
+            try:
+                # 构建sudo命令
+                args = ['sudo', sys.executable] + sys.argv
+                log_message(f"执行: {' '.join(args)}")
+                
+                # 执行sudo命令
+                result = subprocess.run(args)
+                
+                if result.returncode == 0:
+                    sys.exit(0)  # 成功执行，退出当前进程
+                else:
+                    log_message("sudo执行失败", "ERROR")
+                    return False
+            except Exception as e:
+                log_message(f"使用sudo失败: {e}", "ERROR")
+                # 提供手动指导
+                log_message("请手动使用sudo运行此脚本：")
+                log_message(f"  sudo {' '.join(sys.argv)}")
+                return False
+        else:
+            log_message("已有root权限")
+            return True
+    
+    return True
+
+
 def main():
     """主函数"""
     log_message("=== 外部更新脚本启动 ===")
@@ -599,7 +926,16 @@ def main():
                 log_message(f"接收到主程序PID: {main_pid}")
             except ValueError:
                 log_message("无效的PID参数", "WARNING")
+        
         log_message(f"准备更新到版本: {update_info.get('version', 'unknown')}")
+        
+        # 检查权限
+        if not check_permissions():
+            log_message("权限不足，尝试提权...")
+            if not request_elevation():
+                log_message("无法获得必要的权限", "ERROR")
+                pause_on_windows("更新需要管理员权限\n请以管理员身份运行\n按任意键退出...")
+                sys.exit(1)
         
         # 等待主程序退出（如果提供了PID）
         if main_pid:

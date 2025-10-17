@@ -3334,6 +3334,8 @@ python3 "{external_script}" '{update_info_json}'
                         ))
                     except Exception:
                         pass
+                    # 清理失败的更新日志，避免下次重复提示
+                    AutoUpdater.clear_update_log()
                 else:
                     # 这通常是更新过程被中断或者是旧的日志文件
                     # 不显示误导性消息，只在调试模式下输出

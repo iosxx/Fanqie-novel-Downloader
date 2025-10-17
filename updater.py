@@ -793,7 +793,7 @@ class AutoUpdater:
             self._create_update_log(f"程序目录权限检查通过: {current_dir}")
             
             # 优先使用外部更新器进行更新
-        if sys.platform == 'win32' and update_file.endswith('.exe'):
+            if sys.platform == 'win32' and update_file.endswith('.exe'):
                 # Windows 可执行文件：使用外部更新器
                 self._create_update_log("使用外部更新器进行 Windows EXE 更新")
                 

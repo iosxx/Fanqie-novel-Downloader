@@ -116,6 +116,30 @@ def get_current_exe_path():
     return os.path.abspath(sys.argv[0])
 
 
+def _is_probably_executable(path: str) -> bool:
+    """判定路径是否像可执行文件，拒绝 .py 等源码文件被覆盖。"""
+    try:
+        lower = path.lower()
+        # 禁止覆盖源码脚本/文本文件
+        forbidden_exts = ('.py', '.pyw', '.txt', '.md', '.json', '.ini', '.cfg', '.bat', '.cmd', '.ps1', '.sh')
+        if lower.endswith(forbidden_exts):
+            return False
+        # Windows 可执行或无扩展（Linux/macOS）均允许
+        if lower.endswith(('.exe', '.appimage')):
+            return True
+        # 无扩展名时，根据可执行权限粗略判断
+        if not os.path.splitext(path)[1]:
+            try:
+                st = os.stat(path)
+                return bool(st.st_mode & 0o111)
+            except Exception:
+                # 若无法获取，放宽为 True 交由后续复制报错
+                return True
+        return True
+    except Exception:
+        return False
+
+
 def backup_current_exe():
     """备份当前可执行文件"""
     current_exe = get_current_exe_path()
@@ -501,6 +525,10 @@ def install_update_windows(update_file):
     backup_path = None
     try:
         current_exe = get_current_exe_path()
+        # 目标路径校验：拒绝覆盖明显的源码/脚本文件
+        if not _is_probably_executable(current_exe):
+            log_message(f"目标路径看起来不是可执行文件，出于安全原因拒绝覆盖: {current_exe}", "ERROR")
+            return False
         log_message("=" * 60)
         log_message("开始安装更新 (Windows)")
         log_message("=" * 60)
@@ -650,6 +678,10 @@ def install_update_unix(update_file):
     
     try:
         current_exe = get_current_exe_path()
+        # 目标路径校验：拒绝覆盖明显的源码/脚本文件
+        if not _is_probably_executable(current_exe):
+            log_message(f"目标路径看起来不是可执行文件，出于安全原因拒绝覆盖: {current_exe}", "ERROR")
+            return False
         current_dir = os.path.dirname(current_exe)
         
         # 获取平台详情

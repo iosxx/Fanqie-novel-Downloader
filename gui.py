@@ -1131,11 +1131,8 @@ class ModernNovelDownloaderGUI:
         if index < len(self.search_results_data):
             selected_novel = self.search_results_data[index]
             book_id = selected_novel.get('book_id', '')
-            # 如果用户确认，开始下载
-            if confirmed:
-                self.log("开始下载更新...")
-                threading.Thread(target=self.updater.download_update, args=(update_info,), daemon=True).start()
-                threading.Thread(target=self.start_external_update, daemon=True).start()
+            # 展示详情（原有逻辑），不执行与更新无关的调用
+            threading.Thread(target=self._show_book_details_thread, args=(book_id,), daemon=True).start()
     
     def _show_book_details_thread(self, book_id):
         """显示书籍详情线程函数"""
@@ -3352,16 +3349,11 @@ python3 "{external_script}" '{update_info_json}'
     def start_external_update(self, update_file_path: str):
         """启动外部更新脚本"""
         try:
-            # 确保 external_updater.py 存在
-            external_updater_script = os.path.join(os.path.dirname(sys.executable), 'external_updater.py')
-            if not os.path.exists(external_updater_script):
-                # 如果在源码模式下，路径可能不同
-                external_updater_script = os.path.join(os.path.dirname(__file__), 'external_updater.py')
-            
-            if not os.path.exists(external_updater_script):
-                raise FileNotFoundError(f"找不到外部更新脚本: {external_updater_script}")
-            
-            self.log("外部更新脚本已准备就绪")
+            # 直接调用更新器的安装逻辑（内部会根据文件类型选择外部安装/脚本）
+            if hasattr(self, 'updater') and self.updater:
+                threading.Thread(target=lambda: self.updater.install_update(update_file_path, restart=True), daemon=True).start()
+            else:
+                raise RuntimeError("更新系统未初始化")
         except Exception as e:
             self.log(f"启动外部更新脚本失败: {e}")
             messagebox.showerror("更新失败", f"无法启动更新程序: {e}")

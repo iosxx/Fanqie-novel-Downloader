@@ -239,13 +239,9 @@ class UpdateLock:
 
 def is_official_release_build() -> bool:
     """检测是否为GitHub Actions发布版构建（且为打包运行）。"""
-    # 修改：允许所有打包版本进行更新
+    # 仅在 PyInstaller 打包环境允许自动更新；源码环境禁用
     try:
-        # 只要是PyInstaller打包环境就允许更新
-        if getattr(sys, "frozen", False):
-            return True
-        # 源码运行环境也允许更新（开发调试用）
-        return True
+        return bool(getattr(sys, "frozen", False))
     except Exception:
         return False
 
@@ -797,7 +793,7 @@ class AutoUpdater:
             self._create_update_log(f"程序目录权限检查通过: {current_dir}")
             
             # 优先使用外部更新器进行更新
-            if sys.platform == 'win32' and update_file.endswith('.exe'):
+        if sys.platform == 'win32' and update_file.endswith('.exe'):
                 # Windows 可执行文件：使用外部更新器
                 self._create_update_log("使用外部更新器进行 Windows EXE 更新")
                 
@@ -1235,58 +1231,45 @@ if not defined PYTHON_CMD (
 )
 
 :direct_update
-REM 如果没有Python，使用PowerShell下载和替换
+REM 如果没有Python，使用PowerShell下载、可选SHA256校验并替换
 echo 使用PowerShell进行更新...
 powershell -ExecutionPolicy Bypass -Command "& {{
     $updateInfo = '{update_info_json}' | ConvertFrom-Json
     $targetExe = '{target_exe}'
     $tempFile = [System.IO.Path]::GetTempPath() + 'update_temp.exe'
-    
-    # 等待主程序退出
+    $expectedHash = $null
+    if ($updateInfo.checksums -ne $null) {{
+        foreach ($k in $updateInfo.checksums.Keys) {{ if ($k -like '*.exe') {{ $expectedHash = $updateInfo.checksums[$k]; break }} }}
+    }}
     Start-Sleep -Seconds 2
-    
-    # 查找合适的下载URL
     $downloadUrl = $null
-    foreach ($asset in $updateInfo.assets) {{
-        if ($asset.name -like '*.exe') {{
-            $downloadUrl = $asset.download_url
-            break
-        }}
-    }}
-    
-    if (-not $downloadUrl) {{
-        Write-Host '没有找到下载文件' -ForegroundColor Red
-        exit 1
-    }}
-    
-    # 下载文件
+    foreach ($asset in $updateInfo.assets) {{ if ($asset.name -like '*.exe') {{ $downloadUrl = $asset.download_url; break }} }}
+    if (-not $downloadUrl) {{ Write-Host '没有找到下载文件' -ForegroundColor Red; exit 1 }}
     try {{
         Write-Host "下载更新: $downloadUrl"
         $client = New-Object System.Net.WebClient
         $client.Headers['User-Agent'] = 'Tomato-Novel-Downloader'
         $client.DownloadFile($downloadUrl, $tempFile)
-    }} catch {{
-        Write-Host "下载失败: $_" -ForegroundColor Red
-        exit 1
-    }}
-    
-    # 替换文件
+    }} catch {{ Write-Host "下载失败: $_" -ForegroundColor Red; exit 1 }}
+    if ($expectedHash) {{
+        try {{
+            $hash = (Get-FileHash -Path $tempFile -Algorithm SHA256).Hash.ToLower()
+            if ($hash -ne $expectedHash.ToLower()) {{
+                Write-Host "SHA256 校验失败`n 预期: $expectedHash`n 实际: $hash" -ForegroundColor Red
+                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+                exit 1
+            }} else {{ Write-Host 'SHA256 校验通过' -ForegroundColor Green }}
+        }} catch {{ Write-Host "计算校验失败: $_" -ForegroundColor Red; exit 1 }}
+    }} else {{ Write-Host '未提供 SHA256 校验，跳过' -ForegroundColor Yellow }}
     try {{
-        if (Test-Path $targetExe) {{
-            Copy-Item $targetExe "$targetExe.backup" -Force
-            Remove-Item $targetExe -Force
-        }}
+        if (Test-Path $targetExe) {{ Copy-Item $targetExe "$targetExe.backup" -Force; Remove-Item $targetExe -Force }}
         Copy-Item $tempFile $targetExe -Force
-        Remove-Item $tempFile -Force
+        Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
         Write-Host '更新成功完成' -ForegroundColor Green
-        
-        # 重启程序
         Start-Process $targetExe
     }} catch {{
         Write-Host "替换失败: $_" -ForegroundColor Red
-        if (Test-Path "$targetExe.backup") {{
-            Copy-Item "$targetExe.backup" $targetExe -Force
-        }}
+        if (Test-Path "$targetExe.backup") {{ Copy-Item "$targetExe.backup" $targetExe -Force }}
         exit 1
     }}
 }}"

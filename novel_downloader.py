@@ -664,57 +664,79 @@ class TomatoAPI:
         """
         try:
             url = self._url('multi_content')
-            # 使用新的批量接口参数
-            params = {"tab": "批量", "item_ids": ','.join(map(str, item_ids)), "book_id": book_id}
+            params = {
+                "tab": "批量",
+                "item_ids": ','.join(map(str, item_ids)),
+                "book_id": book_id
+            }
             resp = self._get_session().get(url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
             if resp.status_code != 200:
                 with print_lock:
                     print(f"批量获取章节内容失败，状态码: {resp.status_code}")
                 return None
+
             data = resp.json()
-            
-            # 检查返回数据格式
             if data.get('code') != 200:
                 with print_lock:
                     print(f"批量获取失败: {data.get('message', '未知错误')}")
                 return None
-                
-            raw = data.get('data', [])
+
+            raw = data.get('data', data)
             results = []
-            
-            # 支持多种返回格式
-            if isinstance(raw, list):
-                # 直接是数组格式
-                for it in raw:
-                    iid = str(it.get('item_id', ''))
-                    title = it.get('chapter_name') or it.get('title') or ''
-                    content = it.get('content') or it.get('text') or ''
-                    if iid and content:
-                        results.append({'item_id': iid, 'title': title, 'content': content})
-            elif isinstance(raw, dict):
-                # 可能为 { item_id: {content, ...}, ... } 格式
-                for key, val in raw.items():
-                    if isinstance(val, dict):
-                        content = val.get('content') or val.get('text') or ''
-                        title = val.get('chapter_name') or val.get('title') or ''
-                        if content:
-                            results.append({
-                                'item_id': str(key),
-                                'title': title,
-                                'content': content
-                            })
-            
-            # 确保返回的章节顺序与请求顺序一致
+
+            def collect_entries(payload):
+                entries = []
+                if isinstance(payload, dict):
+                    chapters = payload.get('chapters')
+                    if isinstance(chapters, list):
+                        for ch in chapters:
+                            if isinstance(ch, dict):
+                                entries.append(ch)
+                    elif 'data' in payload:
+                        entries.extend(collect_entries(payload.get('data')))
+                    else:
+                        for key, val in payload.items():
+                            if isinstance(val, dict):
+                                enriched = dict(val)
+                                enriched.setdefault('item_id', key)
+                                entries.append(enriched)
+                elif isinstance(payload, list):
+                    for item in payload:
+                        if isinstance(item, dict):
+                            entries.append(item)
+                return entries
+
+            def normalize_entry(entry):
+                if not isinstance(entry, dict):
+                    return
+                novel_data = entry.get('novel_data')
+                item_id = entry.get('item_id') or entry.get('chapter_id')
+                title = entry.get('chapter_name') or entry.get('title') or ''
+                if isinstance(novel_data, dict):
+                    item_id = item_id or novel_data.get('item_id')
+                    title = title or novel_data.get('title') or novel_data.get('chapter_title') or ''
+                content = entry.get('content') or entry.get('text') or ''
+                if item_id and content:
+                    results.append({
+                        'item_id': str(item_id),
+                        'title': title,
+                        'content': content
+                    })
+
+            for entry in collect_entries(raw):
+                normalize_entry(entry)
+
             if results:
                 result_map = {r['item_id']: r for r in results}
                 ordered_results = []
                 for iid in item_ids:
-                    if str(iid) in result_map:
-                        ordered_results.append(result_map[str(iid)])
+                    key = str(iid)
+                    if key in result_map:
+                        ordered_results.append(result_map[key])
                 return ordered_results if ordered_results else results
-            
-            return results if results else None
-            
+
+            return None
+
         except Exception as e:
             with print_lock:
                 print(f"批量获取章节内容异常: {str(e)}")
@@ -722,6 +744,8 @@ class TomatoAPI:
 
 
 # 全局 Tomato API 实例
+
+
 tomato_api = TomatoAPI()
 
 class AsyncAPIManager:
@@ -863,7 +887,11 @@ class AsyncTomatoAPI:
         try:
             session = await self._get_session()
             url = self._url('multi_content')
-            params = {"tab": "批量", "item_ids": ','.join(map(str, item_ids)), "book_id": book_id}
+            params = {
+                "tab": "批量",
+                "item_ids": ','.join(map(str, item_ids)),
+                "book_id": book_id
+            }
 
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
@@ -872,43 +900,66 @@ class AsyncTomatoAPI:
                     return None
 
                 data = await resp.json()
-
                 if data.get('code') != 200:
                     with print_lock:
-                        print(f"异步批量获取失败: {data.get('message', '未知错误')}")
+                        print(f"异步批量获取失败: {data.get('message', '未知错误')}" )
                     return None
 
-                raw = data.get('data', [])
+                raw = data.get('data', data)
                 results = []
 
-                if isinstance(raw, list):
-                    for it in raw:
-                        iid = str(it.get('item_id', ''))
-                        title = it.get('chapter_name') or it.get('title') or ''
-                        content = it.get('content') or it.get('text') or ''
-                        if iid and content:
-                            results.append({'item_id': iid, 'title': title, 'content': content})
-                elif isinstance(raw, dict):
-                    for key, val in raw.items():
-                        if isinstance(val, dict):
-                            content = val.get('content') or val.get('text') or ''
-                            title = val.get('chapter_name') or val.get('title') or ''
-                            if content:
-                                results.append({
-                                    'item_id': str(key),
-                                    'title': title,
-                                    'content': content
-                                })
+                def collect_entries(payload):
+                    entries = []
+                    if isinstance(payload, dict):
+                        chapters = payload.get('chapters')
+                        if isinstance(chapters, list):
+                            for ch in chapters:
+                                if isinstance(ch, dict):
+                                    entries.append(ch)
+                        elif 'data' in payload:
+                            entries.extend(collect_entries(payload.get('data')))
+                        else:
+                            for key, val in payload.items():
+                                if isinstance(val, dict):
+                                    enriched = dict(val)
+                                    enriched.setdefault('item_id', key)
+                                    entries.append(enriched)
+                    elif isinstance(payload, list):
+                        for item in payload:
+                            if isinstance(item, dict):
+                                entries.append(item)
+                    return entries
+
+                def normalize_entry(entry):
+                    if not isinstance(entry, dict):
+                        return
+                    novel_data = entry.get('novel_data')
+                    item_id = entry.get('item_id') or entry.get('chapter_id')
+                    title = entry.get('chapter_name') or entry.get('title') or ''
+                    if isinstance(novel_data, dict):
+                        item_id = item_id or novel_data.get('item_id')
+                        title = title or novel_data.get('title') or novel_data.get('chapter_title') or ''
+                    content = entry.get('content') or entry.get('text') or ''
+                    if item_id and content:
+                        results.append({
+                            'item_id': str(item_id),
+                            'title': title,
+                            'content': content
+                        })
+
+                for entry in collect_entries(raw):
+                    normalize_entry(entry)
 
                 if results:
                     result_map = {r['item_id']: r for r in results}
                     ordered_results = []
                     for iid in item_ids:
-                        if str(iid) in result_map:
-                            ordered_results.append(result_map[str(iid)])
+                        key = str(iid)
+                        if key in result_map:
+                            ordered_results.append(result_map[key])
                     return ordered_results if ordered_results else results
 
-                return results if results else None
+                return None
 
         except asyncio.TimeoutError:
             with print_lock:
@@ -919,7 +970,10 @@ class AsyncTomatoAPI:
                 print(f"异步批量获取异常: {str(e)}")
             return None
 
+
 # 全局异步 Tomato API 实例
+
+
 async_tomato_api = AsyncTomatoAPI()
 
 # ===================== 原有的小说下载功能 =====================
@@ -1739,41 +1793,51 @@ async def download_chapters_async(book_id, chapters_to_download, chapter_results
     if total_tasks == 0:
         return
 
-    # 由于批量API目前不可用，直接使用单章节下载
-    # 但仍然保持异步并发以提高速度
-    # 调整并发批量大小，最多每批并发100章，可通过 config.py 的 async_batch_size 配置
-    batch_size = min(100, CONFIG.get("async_batch_size", 100))  # 限制并发数
-    
-    # 日志输出
+    batch_size = min(100, CONFIG.get("async_batch_size", 100))  # 单批最多章节
+
     with print_lock:
-        print(f"开始下载，总章节数: {total_tasks}, 并发数: {batch_size}")
+        print(f"开始批量下载，总章节数: {total_tasks}, 每批最多: {batch_size}")
 
     completed = 0
     failed_chapters = []
-    
-    # 分批处理以控制并发
-    for start in range(0, total_tasks, batch_size):
-        batch = chapters_to_download[start:start + batch_size]
-        current_batch = start // batch_size + 1
-        total_batches = (total_tasks + batch_size - 1) // batch_size
-        
-        # 使用异步并发下载单个章节
-        tasks = []
-        for ch in batch:
-            task = asyncio.create_task(download_single_chapter_async(ch['id']))
-            tasks.append((task, ch))
-        
-        # 等待所有任务完成
-        for task, ch in tasks:
-            try:
-                result = await task
-                if result:
-                    content = result.get('content', '')
+    total_batches = (total_tasks + batch_size - 1) // batch_size or 1
+
+    try:
+        for start in range(0, total_tasks, batch_size):
+            batch = chapters_to_download[start:start + batch_size]
+            current_batch = start // batch_size + 1
+            item_ids = [ch['id'] for ch in batch]
+
+            results = await async_tomato_api.get_multi_content_async(book_id, item_ids)
+            result_map = {}
+            if results:
+                for item in results:
+                    item_id = str(item.get('item_id', '')).strip()
+                    if item_id:
+                        result_map[item_id] = item
+
+            if not result_map:
+                failed_chapters.extend(batch)
+                with print_lock:
+                    print(f"批量接口返回为空，批次 {current_batch}/{total_batches}")
+                for _ in batch:
+                    if pbar:
+                        pbar.update(1)
+                if gui_callback:
+                    progress = int((completed / total_tasks) * 80) + 10
+                    gui_callback(progress, f"下载进度 [{current_batch}/{total_batches}]: {completed}/{total_tasks}")
+                continue
+
+            for ch in batch:
+                chapter_id = str(ch['id'])
+                payload = result_map.get(chapter_id)
+                if payload:
+                    content = payload.get('content') or payload.get('text') or ''
                     if content:
                         processed = process_chapter_content(content)
                         chapter_results[ch['index']] = {
                             'base_title': ch['title'],
-                            'api_title': result.get('title', ''),
+                            'api_title': payload.get('title', ''),
                             'content': processed
                         }
                         downloaded_ids.add(ch['id'])
@@ -1782,55 +1846,47 @@ async def download_chapters_async(book_id, chapters_to_download, chapter_results
                         failed_chapters.append(ch)
                 else:
                     failed_chapters.append(ch)
-            except Exception as e:
-                failed_chapters.append(ch)
-                if CONFIG.get('verbose_logging', False):
-                    with print_lock:
-                        print(f"章节 {ch['title']} 下载异常: {str(e)}")
-            
-            if pbar:
-                pbar.update(1)
-        
-        # 更新进度
-        if gui_callback:
-            progress = int((completed / total_tasks) * 80) + 10
-            gui_callback(progress, f"下载进度 [{current_batch}/{total_batches}]: {completed}/{total_tasks}")
-    
-    # 重试失败的章节
-    if failed_chapters:
-        with print_lock:
-            print(f"\n开始重试 {len(failed_chapters)} 个失败章节...")
-        
-        for ch in failed_chapters:
-            try:
-                data = tomato_api.get_content(ch['id'])
-                if data and data.get('content'):
-                    processed = process_chapter_content(data.get('content', ''))
-                    chapter_results[ch['index']] = {
-                        'base_title': ch['title'],
-                        'api_title': data.get('title', ''),
-                        'content': processed
-                    }
-                    downloaded_ids.add(ch['id'])
-                    completed += 1
-                    if pbar:
-                        pbar.update(1)
-            except Exception:
-                pass  # 重试失败，忽略
-    
-    # 最终统计
+
+                if pbar:
+                    pbar.update(1)
+
+            if gui_callback:
+                progress = int((completed / total_tasks) * 80) + 10
+                gui_callback(progress, f"下载进度 [{current_batch}/{total_batches}]: {completed}/{total_tasks}")
+
+        if failed_chapters:
+            with print_lock:
+                print(f"\n批量下载失败章节数: {len(failed_chapters)}，尝试单章兜底...")
+
+            for ch in failed_chapters:
+                try:
+                    data = tomato_api.get_content(ch['id'])
+                    if data and data.get('content'):
+                        processed = process_chapter_content(data.get('content', ''))
+                        chapter_results[ch['index']] = {
+                            'base_title': ch['title'],
+                            'api_title': data.get('title', ''),
+                            'content': processed
+                        }
+                        downloaded_ids.add(ch['id'])
+                        completed += 1
+                        if pbar:
+                            pbar.update(1)
+                except Exception:
+                    pass
+    finally:
+        await async_tomato_api.close()
+
     if gui_callback:
         progress = int((completed / total_tasks) * 80) + 10
         gui_callback(progress, f"下载完成: {completed}/{total_tasks}")
-    
+
     with print_lock:
         if failed_chapters:
             final_failed = [ch for ch in failed_chapters if ch['id'] not in downloaded_ids]
             if final_failed:
                 print(f"最终有 {len(final_failed)} 个章节下载失败")
         print(f"成功下载 {len(downloaded_ids)} 个章节")
-
-    await async_tomato_api.close()
 
 
 async def download_single_chapter_async(item_id: str) -> Optional[Dict]:

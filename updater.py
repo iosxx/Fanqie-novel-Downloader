@@ -145,12 +145,33 @@ class UpdateLock:
     def is_locked(self) -> bool:
         if self.locked:
             return True
+
+        if not self.lock_file.exists():
+            return False
+
         try:
-            with self.lock_file.open("r"):
-                pass
+            if sys.platform.startswith("win"):
+                import msvcrt  # type: ignore
+                with self.lock_file.open("r+") as handle:
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                        return False
+                    except OSError:
+                        return True
+            else:
+                import fcntl  # type: ignore
+                with self.lock_file.open("a+") as handle:
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                        return False
+                    except (BlockingIOError, OSError):
+                        return True
+        except FileNotFoundError:
             return False
         except Exception:
-            return True
+            return False
 
 
 def is_official_release_build() -> bool:

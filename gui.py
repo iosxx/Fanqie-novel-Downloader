@@ -3089,36 +3089,28 @@ API数量: {saved_api_count}个
         
         def worker():
             try:
-                # 检查是否有新版本
-                update_info = self.updater.checker.get_update_info() if self.updater.checker.has_update(force=True) else None
-                
-                if update_info:
-                    # 发现新版本，启动强制更新流程
-                    self.root.after(0, lambda: self.updater._start_force_update(update_info))
+                info = self.updater.checker.get_latest_update(force=True)
+                if info:
+                    self.root.after(0, lambda: self._prompt_update(info))
                 else:
-                    # 没有新版本，正常启动
-                    print("当前已是最新版本")
-                    
+                    print("当前已是最新版。")
             except Exception as e:
-                # 检查更新失败，继续启动程序
                 print(f"强制更新检查失败: {e}")
-        
+
         threading.Thread(target=worker, daemon=True).start()
 
     def _prompt_update(self, update_info):
-        """弹窗提示用户是否更新，并在确认后触发强制更新流程"""
+        """弹窗提示用户是否更新，并在确认后触发更新流程"""
         try:
             ver = update_info.get('version', '?') if isinstance(update_info, dict) else '?'
-            body = update_info.get('body', '') if isinstance(update_info, dict) else ''
-            msg = f"发现新版本 v{ver}，是否现在更新？"
+            body = (update_info.get('body', '') if isinstance(update_info, dict) else '') or ''
+            message = f"发现新版 v{ver}，是否现在更新？"
             if body:
-                msg += f"\n\n更新内容:\n{body[:800]}"
-            if messagebox.askyesno("发现新版本", msg):
+                message += f"\n\n更新内容:\n{body[:800]}"
+            if messagebox.askyesno("发现新版本", message):
                 if hasattr(self, 'updater') and self.updater:
-                    # 保存配置
                     self.save_config()
-                    # 开始更新流程（内部会自动退出程序）
-                    self.updater._start_force_update(update_info)
+                    threading.Thread(target=lambda: self.updater.apply_release(update_info, restart=True), daemon=True).start()
         except Exception as e:
             self.log(f"提示更新失败: {e}")
 
@@ -3128,13 +3120,9 @@ API数量: {saved_api_count}个
             if not hasattr(self, 'updater') or self.updater is None:
                 messagebox.showerror("更新系统未初始化", "更新系统未正确初始化，无法检查更新。")
                 return
-            # 强制检查最新版本
-            if self.updater.checker.has_update(force=True):
-                info = self.updater.checker.get_latest_release(force_check=True)
-                if info:
-                    self._prompt_update(info)
-                else:
-                    messagebox.showinfo("检查更新", "检测到新版本，但获取详细信息失败。")
+            info = self.updater.checker.get_latest_update(force=True)
+            if info:
+                self._prompt_update(info)
             else:
                 messagebox.showinfo("检查更新", "当前已是最新版本。")
         except Exception as e:
@@ -3348,61 +3336,52 @@ python3 "{external_script}" '{update_info_json}'
             if hasattr(sys, '_MEIPASS') and '-debug' in sys.argv[0].lower():
                 print(f"[DEBUG] 检查更新状态失败: {e}")
 
-    def start_external_update(self, update_file_path: str):
-        """启动外部更新脚本"""
-        try:
-            # 直接调用更新器的安装逻辑（内部会根据文件类型选择外部安装/脚本）
-            if hasattr(self, 'updater') and self.updater:
-                threading.Thread(target=lambda: self.updater.install_update(update_file_path, restart=True), daemon=True).start()
-            else:
-                raise RuntimeError("更新系统未初始化")
-        except Exception as e:
-            self.log(f"启动外部更新脚本失败: {e}")
-            messagebox.showerror("更新失败", f"无法启动更新程序: {e}")
-
     def on_update_event(self, event: str, data: any):
         """处理所有更新相关的GUI事件"""
         if event == 'check_start':
             self.log("正在检查更新...")
-        
         elif event == 'update_available':
             self.log(f"发现新版本: {data['version']}")
             ver = data.get('version', '?')
-            body = data.get('body', '').strip()
-            msg = f"发现新版本 v{ver}，是否现在更新？"
+            body = (data.get('body') or '').strip()
+            message = f"发现新版 v{ver}，是否立即更新？"
             if body:
-                msg += f"\n\n更新内容:\n{body[:800]}" # 限制显示长度
-            
-            if messagebox.askyesno("发现新版本", msg):
-                self.log("启动外部更新流程...")
-                # 使用外部更新脚本执行下载与覆盖，避免在程序内操作
-                self.updater._start_force_update(data)
-
+                message += f"\n\n更新内容:\n{body[:800]}"
+            if messagebox.askyesno("发现新版本", message):
+                self.log("开始下载更新包...")
+                threading.Thread(target=lambda: self.updater.apply_release(data, restart=True), daemon=True).start()
         elif event == 'no_update':
             self.log("当前已是最新版本。")
             messagebox.showinfo("检查更新", "当前已是最新版本。")
-
+        elif event == 'download_start':
+            self.update_progress(0, "开始下载更新包...")
         elif event == 'download_progress':
+            percent = data.get('percent', 0.0)
+            total = data.get('total', 0)
             current = data.get('current', 0)
-            total = data.get('total', 1)
-            percent = data.get('percent', 0)
-            self.update_progress(percent, f"正在下载更新: {current//1024}KB / {total//1024}KB")
-
+            total_kb = max(total, 1) // 1024
+            self.update_progress(percent, f"正在下载更新包: {current//1024}KB / {total_kb}KB ({percent:.1f}%)")
         elif event == 'download_complete':
-            self.log("更新文件下载完成，准备安装...")
+            self.log("更新包下载完成，正在解压准备安装。")
             self.update_progress(100, "下载完成，准备安装...")
-            # 若为强制更新流程，内部会直接 install 并重启，此处不再触发外部安装
-            try:
-                if hasattr(self, 'updater') and getattr(self.updater, '_force_update_in_progress', False):
-                    return
-            except Exception:
-                pass
-            # 手动更新流程：启动外部更新脚本
-            self.start_external_update(data)  # data 是下载的文件路径
-
-        elif event == 'download_error':
-            messagebox.showerror("更新失败", f"下载更新文件失败: {data}")
+        elif event == 'install_ready':
+            self.log("更新文件已准备完成，等待程序退出以完成替换。")
+            messagebox.showinfo("准备安装", "更新文件已准备完成，点击确定后程序将退出以完成替换。")
+        elif event == 'helper_started':
+            self.log("更新助手已启动，程序即将退出。")
+            self.update_progress(100, "更新助手已启动，程序即将退出...")
+            self.root.after(800, self.root.quit)
+        elif event == 'install_scheduled':
+            self.log("已安排安装任务。")
+        elif event == 'install_error':
+            self.log(f"安装更新失败: {data}")
+            messagebox.showerror("更新失败", f"安装更新失败：{data}")
             self.update_progress(0, "更新失败")
+        elif event == 'download_error':
+            self.log(f"下载更新失败: {data}")
+            messagebox.showerror("更新失败", f"下载更新文件失败：{data}")
+            self.update_progress(0, "更新失败")
+
 
 
 if __name__ == '__main__':

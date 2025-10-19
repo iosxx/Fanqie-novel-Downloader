@@ -152,19 +152,23 @@ class APIManager:
             
             if response.status_code == 200:
                 data = response.json()
-                
+
                 # 根据新API文档处理响应
                 if data.get("code") == 200 and "data" in data:
-                    # 标准响应格式
-                    if isinstance(data["data"], dict):
-                        return data["data"]
-                    else:
-                        with print_lock:
-                            print(f"书籍信息响应格式不符: {type(data['data'])}")
-                        return None
-                else:
+                    inner = data.get("data")
+
+                    # 兼容数据嵌套 {code:0,data:{...}}
+                    if isinstance(inner, dict) and "data" in inner and len(inner) <= 3:
+                        inner = inner.get("data")
+
+                    if isinstance(inner, dict):
+                        return inner
                     with print_lock:
-                        print(f"获取书籍信息失败: {data.get('message', '未知响应格式')}")
+                        print(f"书籍信息响应格式不符: {type(inner)}")
+                    return None
+
+                with print_lock:
+                    print(f"获取书籍信息失败: {data.get('message', '未知响应格式')}")
             else:
                 with print_lock:
                     print(f"获取书籍信息请求失败，状态码: {response.status_code}")
@@ -496,6 +500,8 @@ class TomatoAPI:
                 return None
             data = resp.json()
             raw = data.get('data', data)
+            if isinstance(raw, dict) and 'data' in raw and len(raw) <= 3:
+                raw = raw.get('data')
             if isinstance(raw, dict):
                 return {
                     'book_id': str(raw.get('book_id') or book_id),

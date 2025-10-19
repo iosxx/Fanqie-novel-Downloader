@@ -1,708 +1,436 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-自动更新模块
-提供基于GitHub Releases的版本检测和自动更新功能
-"""
+'''Self-update module for Tomato Novel Downloader (refactored).'''
+from __future__ import annotations
 
+import json
 import os
 import sys
-import json
 import time
 import shutil
 import zipfile
+import tarfile
+import subprocess
 import tempfile
 import threading
-import subprocess
-import importlib
-from typing import Optional, Dict, Any, Callable, List
-from datetime import datetime, timedelta
 import platform
+import hashlib
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, Callable, List
 
-# 平台特定的模块导入
-if sys.platform == 'win32':
-    try:
-        import msvcrt
-    except ImportError:
-        msvcrt = None
-else:
-    try:
-        import fcntl
-    except ImportError:
-        fcntl = None
-
-# 延迟导入第三方依赖，避免模块导入失败
 _requests = None
 _packaging_version = None
-_dependencies_available = None
 
-def _check_dependencies():
-    """检查并导入必要的依赖库"""
-    global _requests, _packaging_version, _dependencies_available
-    
-    if _dependencies_available is not None:
-        return _dependencies_available
-    
-    try:
-        import requests as req
-        from packaging import version as pkg_ver
-        _requests = req
-        _packaging_version = pkg_ver
-        _dependencies_available = True
+UPDATE_LOG_PATH = Path(tempfile.gettempdir()) / "update.log"
+HELPER_SCRIPT_BASENAME = "tomato_update_helper.py"
+
+
+def _ensure_dependencies() -> bool:
+    '''Lazy import of third-party dependencies.'''
+    global _requests, _packaging_version
+    if _requests is not None and _packaging_version is not None:
         return True
-    except ImportError as e:
-        _dependencies_available = False
-        print(f"警告：更新模块依赖缺失: {e}")
-        print("请安装依赖：pip install requests packaging")
+    try:
+        import requests  # type: ignore
+        from packaging import version as pkg_version  # type: ignore
+        _requests = requests
+        _packaging_version = pkg_version
+        return True
+    except Exception as exc:  # pragma: no cover
+        print(f"[Updater] missing dependency: {exc}")
+        print("Please install: pip install requests packaging")
         return False
 
+
 def _get_requests():
-    """获取 requests 模块"""
-    if not _check_dependencies():
-        raise ImportError("requests 模块未安装，请运行: pip install requests")
+    if not _ensure_dependencies():
+        raise ImportError("requests is not available")
     return _requests
 
+
 def _get_packaging_version():
-    """获取 packaging.version 模块"""
-    if not _check_dependencies():
-        raise ImportError("packaging 模块未安装，请运行: pip install packaging")
+    if not _ensure_dependencies():
+        raise ImportError("packaging is not available")
     return _packaging_version
 
-try:
-    # 引入构建元信息，避免与packaging.version冲突
-    import config as app_meta
-except Exception:
-    app_meta = None
+
+def _log(message: str, level: str = "INFO", echo: bool = False) -> None:
+    '''Append a line to the shared update log.'''
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{timestamp}] [{level}] {message}"
+    try:
+        UPDATE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with UPDATE_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except Exception:
+        pass
+    if echo:
+        print(line)
 
 
 class UpdateLock:
-    """更新进程锁，防止多个更新进程同时运行"""
-    
-    def __init__(self):
-        self.lock_file = os.path.join(tempfile.gettempdir(), 'tomato_novel_updater.lock')
-        self.lock_handle = None
+    '''Prevent multiple update processes from running simultaneously.'''
+
+    def __init__(self) -> None:
+        self.lock_file = Path(tempfile.gettempdir()) / "tomato_novel_updater.lock"
+        self._handle = None
         self.locked = False
-        
+
     def acquire(self, timeout: int = 10) -> bool:
-        """获取锁（非阻塞，带超时）"""
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
             try:
-                # 尝试打开或创建锁文件
-                self.lock_handle = open(self.lock_file, 'w')
-                
-                if sys.platform == 'win32':
-                    # Windows: 使用msvcrt文件锁
-                    import msvcrt
+                handle = self.lock_file.open("w")
+                if sys.platform.startswith("win"):
+                    import msvcrt  # type: ignore
                     try:
-                        # 尝试获取独占锁（非阻塞）
-                        msvcrt.locking(self.lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
-                        # 写入进程信息
-                        self.lock_handle.write(f"{os.getpid()}\n{time.time()}")
-                        self.lock_handle.flush()
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        handle.write(str(os.getpid()))
+                        handle.flush()
+                        self._handle = handle
                         self.locked = True
                         return True
-                    except IOError:
-                        # 锁被占用，等待后重试
-                        self.lock_handle.close()
-                        self.lock_handle = None
+                    except OSError:
+                        handle.close()
+                        time.sleep(0.2)
                 else:
-                    # Unix/Linux/macOS: 使用fcntl文件锁
-                    import fcntl
+                    import fcntl  # type: ignore
                     try:
-                        # 尝试获取独占锁（非阻塞）
-                        fcntl.flock(self.lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        # 写入进程信息
-                        self.lock_handle.write(f"{os.getpid()}\n{time.time()}")
-                        self.lock_handle.flush()
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        handle.write(str(os.getpid()))
+                        handle.flush()
+                        self._handle = handle
                         self.locked = True
                         return True
-                    except (IOError, BlockingIOError):
-                        # 锁被占用，等待后重试
-                        self.lock_handle.close()
-                        self.lock_handle = None
-                        
-            except Exception as e:
-                print(f"获取更新锁失败: {e}")
-                if self.lock_handle:
-                    try:
-                        self.lock_handle.close()
-                    except:
-                        pass
-                    self.lock_handle = None
-                    
-            # 等待一小段时间后重试
-            time.sleep(0.5)
-            
+                    except (BlockingIOError, OSError):
+                        handle.close()
+                        time.sleep(0.2)
+            except FileNotFoundError:
+                self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                time.sleep(0.2)
         return False
-        
-    def release(self):
-        """释放锁"""
-        if self.locked and self.lock_handle:
-            try:
-                if sys.platform == 'win32':
-                    import msvcrt
-                    try:
-                        # Windows: 解锁文件
-                        msvcrt.locking(self.lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    except:
-                        pass
-                else:
-                    import fcntl
-                    try:
-                        # Unix: 解锁文件
-                        fcntl.flock(self.lock_handle.fileno(), fcntl.LOCK_UN)
-                    except:
-                        pass
-                        
-                self.lock_handle.close()
-                self.lock_handle = None
-                self.locked = False
-                
-                # 尝试删除锁文件
-                try:
-                    os.remove(self.lock_file)
-                except:
-                    pass
-                    
-            except Exception as e:
-                print(f"释放更新锁失败: {e}")
-                
-    def is_locked(self) -> bool:
-        """检查是否有其他进程持有锁"""
+
+    def release(self) -> None:
+        if not self.locked:
+            return
         try:
-            # 尝试读取锁文件
-            if os.path.exists(self.lock_file):
+            if self._handle is not None:
                 try:
-                    with open(self.lock_file, 'r') as f:
-                        lines = f.readlines()
-                        if lines:
-                            pid = int(lines[0].strip())
-                            lock_time = float(lines[1].strip()) if len(lines) > 1 else 0
-                            
-                            # 检查锁是否过期（超过5分钟）
-                            if time.time() - lock_time > 300:
-                                # 锁已过期，尝试删除
-                                try:
-                                    os.remove(self.lock_file)
-                                except:
-                                    pass
-                                return False
-                                
-                            # 检查持有锁的进程是否还在运行
-                            if sys.platform == 'win32':
-                                import ctypes
-                                kernel32 = ctypes.windll.kernel32
-                                SYNCHRONIZE = 0x00100000
-                                process = kernel32.OpenProcess(SYNCHRONIZE, 0, pid)
-                                if process == 0:
-                                    # 进程不存在，锁无效
-                                    try:
-                                        os.remove(self.lock_file)
-                                    except:
-                                        pass
-                                    return False
-                                kernel32.CloseHandle(process)
-                            else:
-                                try:
-                                    os.kill(pid, 0)
-                                except (OSError, ProcessLookupError):
-                                    # 进程不存在，锁无效
-                                    try:
-                                        os.remove(self.lock_file)
-                                    except:
-                                        pass
-                                    return False
-                                    
-                            return True
+                    if sys.platform.startswith("win"):
+                        import msvcrt  # type: ignore
+                        msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl  # type: ignore
+                        fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
                 except Exception:
-                    # 读取失败，认为没有锁
-                    return False
+                    pass
+                finally:
+                    try:
+                        self._handle.close()
+                    except Exception:
+                        pass
+        finally:
+            self._handle = None
+            self.locked = False
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+
+    def is_locked(self) -> bool:
+        if self.locked:
+            return True
+        try:
+            with self.lock_file.open("r"):
+                pass
             return False
         except Exception:
-            return False
-            
-    def __enter__(self):
-        """上下文管理器入口"""
-        if not self.acquire():
-            raise RuntimeError("无法获取更新锁，可能有其他更新正在进行")
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """上下文管理器出口"""
-        self.release()
-        
-    def __del__(self):
-        """析构函数，确保锁被释放"""
-        if self.locked:
-            self.release()
+            return True
 
 
 def is_official_release_build() -> bool:
-    """检测是否为GitHub Actions发布版构建（且为打包运行）。"""
-    # 仅在 PyInstaller 打包环境允许自动更新；源码环境禁用
+    '''Return True when running from a PyInstaller bundle.'''
     try:
         return bool(getattr(sys, "frozen", False))
     except Exception:
         return False
 
 
+@dataclass
+class _AssetCandidate:
+    name: str
+    download_url: str
+    size: int = 0
+    content_type: str = ""
+
+
 class UpdateChecker:
-    """版本检测器"""
-    
-    def __init__(self, github_repo: str, current_version: str):
-        """
-        初始化更新检测器
-        
-        Args:
-            github_repo: GitHub仓库地址，格式为 'owner/repo'
-            current_version: 当前版本号
-        """
+    '''Query GitHub releases and compare versions.'''
+
+    def __init__(self, github_repo: str, current_version: str, cache_ttl: int = 900) -> None:
         self.github_repo = github_repo
-        self.current_version = current_version
-        self.api_base = "https://api.github.com"
-        self.check_interval = 3600  # 检查间隔（秒）
-        self.last_check_time = None
-        self.cached_release = None
-        
-    def get_latest_release(self, force_check: bool = False) -> Optional[Dict[str, Any]]:
-        """
-        获取最新版本信息
-        
-        Args:
-            force_check: 是否强制检查（忽略缓存）
-            
-        Returns:
-            最新版本信息字典，包含版本号、下载链接等
-        """
-        # 检查缓存
-        if not force_check and self.cached_release and self.last_check_time:
-            if time.time() - self.last_check_time < self.check_interval:
-                return self.cached_release
-        
+        self.current_version = (current_version or "0.0.0").strip()
+        self.cache_ttl = cache_ttl
+        self.timeout = 20
+        self._cache: Optional[Dict[str, Any]] = None
+        self._cache_time = 0.0
+
+    def _headers(self) -> Dict[str, str]:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "TomatoNovelDownloader"
+        }
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    @staticmethod
+    def _normalize_version(tag: Optional[str]) -> str:
+        if not tag:
+            return "0.0.0"
+        tag = tag.strip()
+        if tag.lower().startswith("v"):
+            tag = tag[1:]
+        return tag
+
+    @staticmethod
+    def _is_timestamp_version(version: str) -> bool:
+        parts = version.split("+")
+        if len(parts) != 2:
+            return False
+        date_part, suffix = parts
         try:
-            # 延迟导入 requests
-            requests = _get_requests()
-            
-            url = f"{self.api_base}/repos/{self.github_repo}/releases/latest"
-            headers = {
-                'Accept': 'application/vnd.github.v3+json',
-                'User-Agent': 'Tomato-Novel-Downloader'
-            }
-            token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
-            if token:
-                headers['Authorization'] = f'Bearer {token}'
-            
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            release_data = response.json()
-            
-            # 解析版本信息
-            release_info = {
-                'version': release_data['tag_name'].lstrip('v'),
-                'name': release_data['name'],
-                'body': release_data['body'],
-                'published_at': release_data['published_at'],
-                'html_url': release_data['html_url'],
-                'assets': [],
-                'checksums': {}  # 存储SHA256校验值
-            }
-            
-            # 解析下载链接和校验文件
-            checksum_asset = None
-            for asset in release_data.get('assets', []):
-                asset_info = {
-                    'name': asset['name'],
-                    'size': asset['size'],
-                    'download_url': asset['browser_download_url'],
-                    'content_type': asset['content_type']
-                }
-                release_info['assets'].append(asset_info)
-                
-                # 查找SHA256校验文件（通常名为checksums.txt或SHA256SUMS）
-                if any(x in asset['name'].lower() for x in ['checksum', 'sha256', 'hash']):
-                    checksum_asset = asset
-            
-            # 尝试下载并解析校验文件
-            if checksum_asset:
-                try:
-                    checksum_response = requests.get(
-                        checksum_asset['browser_download_url'], 
-                        headers=headers, 
-                        timeout=10
-                    )
-                    checksum_response.raise_for_status()
-                    checksum_text = checksum_response.text
-                    
-                    # 解析校验文件（格式：SHA256 filename）
-                    for line in checksum_text.strip().split('\n'):
-                        if line.strip():
-                            parts = line.strip().split()
-                            if len(parts) >= 2:
-                                # 支持两种格式：'hash filename' 或 'hash *filename'
-                                hash_value = parts[0].lower()
-                                filename = parts[-1].lstrip('*')
-                                release_info['checksums'][filename] = hash_value
-                except Exception as e:
-                    print(f"下载校验文件失败: {e}")
-            
-            # 尝试从release body中提取SHA256（如果没有单独的校验文件）
-            if not release_info['checksums'] and release_data.get('body'):
-                self._extract_checksums_from_body(release_data['body'], release_info['checksums'])
-            
-            # 更新缓存
-            self.cached_release = release_info
-            self.last_check_time = time.time()
-            
-            return release_info
-            
-        except ImportError as e:
-            print(f"检查更新失败: 缺少依赖库 - {e}")
-            return None
-        except Exception as e:
-            # 捕获所有异常（包括 requests.exceptions.RequestException）
-            print(f"检查更新失败: {e}")
-            return None
-    
-    def _extract_checksums_from_body(self, body: str, checksums: Dict[str, str]):
-        """从release body中提取SHA256校验值"""
-        import re
-        # 匹配SHA256格式：SHA256 (filename) = hash 或 filename: hash
-        patterns = [
-            r'SHA256\s*\(([^)]+)\)\s*=\s*([a-fA-F0-9]{64})',  # SHA256 (file) = hash
-            r'([^\s:]+(?:\.exe|\.zip|\.tar\.gz|\.dmg|\.AppImage))\s*:\s*([a-fA-F0-9]{64})',  # file: hash
-            r'([a-fA-F0-9]{64})\s+\*?([^\s]+(?:\.exe|\.zip|\.tar\.gz|\.dmg|\.AppImage))'  # hash file
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, body)
-            for match in matches:
-                if len(match) == 2:
-                    # 根据匹配模式确定文件名和哈希值的位置
-                    if pattern.startswith(r'([a-fA-F0-9]{64})'):
-                        hash_value, filename = match
-                    else:
-                        filename, hash_value = match
-                    checksums[filename.strip()] = hash_value.strip().lower()
-    
-    def verify_file_checksum(self, filepath: str, expected_hash: str) -> bool:
-        """验证文件的SHA256校验值"""
-        import hashlib
-        try:
-            sha256 = hashlib.sha256()
-            with open(filepath, 'rb') as f:
-                while chunk := f.read(8192):
-                    sha256.update(chunk)
-            
-            actual_hash = sha256.hexdigest().lower()
-            expected_hash = expected_hash.lower()
-            
-            if actual_hash != expected_hash:
-                print(f"SHA256校验失败:")
-                print(f"  预期: {expected_hash}")
-                print(f"  实际: {actual_hash}")
-                return False
-            
-            print(f"SHA256校验通过: {os.path.basename(filepath)}")
+            numbers = [int(x) for x in date_part.split('.')]
+        except ValueError:
+            return False
+        if len(numbers) != 4:
+            return False
+        if len(suffix) not in (7, 8):
+            return False
+        return all(c in "0123456789abcdef" for c in suffix.lower())
+
+    @staticmethod
+    def _compare_timestamp_versions(candidate: str, current: str) -> bool:
+        def parse(ver: str):
+            try:
+                main, suffix = ver.split("+", 1)
+                numbers = [int(x) for x in main.split('.')]
+                return numbers, suffix
+            except Exception:
+                return [], ""
+
+        cand_numbers, cand_suffix = parse(candidate)
+        curr_numbers, curr_suffix = parse(current)
+        if not cand_numbers or not curr_numbers:
+            return candidate != current
+        if cand_numbers > curr_numbers:
             return True
-        except Exception as e:
-            print(f"计算文件SHA256失败: {e}")
+        if cand_numbers < curr_numbers:
             return False
-    
-    def has_update(self, force_check: bool = False, force: Optional[bool] = None) -> bool:
-        """
-        检查是否有新版本
-        
-        Args:
-            force_check: 是否强制检查
-            force: 兼容旧调用的别名参数（等价于 force_check）
-            
-        Returns:
-            是否有新版本
-        """
-        # 兼容旧调用：允许使用 force 关键字作为别名
-        if force is not None:
-            force_check = force
-        latest_release = self.get_latest_release(force_check)
-        if not latest_release:
-            return False
-        
-        try:
-            latest_version = latest_release['version']
-            current_version = self.current_version
-            
-            # 如果版本号包含日期格式（YYYY.MM.DD.HHMM+hash），使用字符串比较
-            if self._is_timestamp_version(latest_version) or self._is_timestamp_version(current_version):
-                return self._compare_timestamp_versions(latest_version, current_version)
-            
-            # 传统版本号使用packaging.version比较
-            pkg_version = _get_packaging_version()
-            latest_ver = pkg_version.parse(latest_version)
-            current_ver = pkg_version.parse(current_version)
-            return latest_ver > current_ver
-        except ImportError as e:
-            print(f"版本比较失败: 缺少依赖库 - {e}")
-            return False
-        except Exception as e:
-            print(f"版本比较失败: {e}")
-            return False
-    
-    def _is_timestamp_version(self, ver_str: str) -> bool:
-        """检查是否为时间戳格式的版本号（YYYY.MM.DD.HHMM+hash）"""
+        return cand_suffix > curr_suffix
+
+    @staticmethod
+    def _extract_checksums_from_body(body: str, container: Dict[str, str]) -> None:
         import re
-        pattern = r'^\d{4}\.\d{2}\.\d{2}\.\d{4}\+[a-f0-9]{7}$'
-        return bool(re.match(pattern, ver_str))
-    
-    def _compare_timestamp_versions(self, latest: str, current: str) -> bool:
-        """
-        比较时间戳格式的版本号
-        格式: YYYY.MM.DD.HHMM+hash
-        """
+        patterns = [
+            re.compile(r"SHA256\s*\(([^)]+)\)\s*=\s*([A-Fa-f0-9]{64})"),
+            re.compile(r"([A-Fa-f0-9]{64})\s+\*?([\w\.-]+)"),
+            re.compile(r"([\w\.-]+)\s*[:=]\s*([A-Fa-f0-9]{64})")
+        ]
+        for line in body.splitlines():
+            text = line.strip()
+            if len(text) < 64:
+                continue
+            for pattern in patterns:
+                match = pattern.search(text)
+                if match:
+                    groups = match.groups()
+                    if len(groups) == 2:
+                        first, second = groups
+                        if len(first) == 64:
+                            digest, filename = first, second
+                        elif len(second) == 64:
+                            filename, digest = first, second
+                        else:
+                            continue
+                        container[filename.strip()] = digest.strip().lower()
+                        break
+
+    def _is_newer_version(self, candidate: str) -> bool:
+        if self._is_timestamp_version(candidate) or self._is_timestamp_version(self.current_version):
+            return self._compare_timestamp_versions(candidate, self.current_version)
         try:
-            # 首先检查完整版本号是否相同
-            if latest.strip() == current.strip():
-                return False
-            
-            # 提取时间戳部分进行比较
-            latest_timestamp = latest.split('+')[0] if '+' in latest else latest
-            current_timestamp = current.split('+')[0] if '+' in current else current
-            
-            # 如果是传统版本号，认为较旧
-            if not self._is_timestamp_version(current):
-                return True
-            
-            # 时间戳比较：较新的时间戳表示更新的版本
-            if latest_timestamp == current_timestamp:
-                # hash不同也认为是不同版本，但通常不需要更新
-                return False
-            
-            return latest_timestamp > current_timestamp
-        except Exception as e:
-            print(f"版本比较异常: {e}")
-            return False
-    
-    def get_update_info(self) -> Optional[Dict[str, Any]]:
-        """
-        获取更新信息（版本号、更新内容等）
-        
-        Returns:
-            更新信息字典
-        """
-        if not self.has_update():
+            ver_mod = _get_packaging_version()
+            return ver_mod.parse(candidate) > ver_mod.parse(self.current_version)
+        except Exception:
+            return candidate != self.current_version
+
+    def fetch_latest_release(self, include_prerelease: bool = False) -> Optional[Dict[str, Any]]:
+        if not _ensure_dependencies():
             return None
-        
-        return self.cached_release
+        requests = _get_requests()
+        url = f"https://api.github.com/repos/{self.github_repo}/releases"
+        try:
+            resp = requests.get(url, headers=self._headers(), params={"per_page": 5}, timeout=self.timeout)
+            resp.raise_for_status()
+        except Exception as exc:
+            _log(f"failed to query releases: {exc}", "ERROR")
+            return None
+        releases = resp.json()
+        if not isinstance(releases, list):
+            return None
+        for release in releases:
+            if release.get("draft"):
+                continue
+            if not include_prerelease and release.get("prerelease"):
+                continue
+            return release
+        return None
+
+    def get_latest_update(self, force: bool = False, include_prerelease: bool = False) -> Optional[Dict[str, Any]]:
+        now = time.time()
+        if not force and self._cache and (now - self._cache_time) < self.cache_ttl:
+            return self._cache
+        release = self.fetch_latest_release(include_prerelease=include_prerelease)
+        if not release:
+            return None
+        version = self._normalize_version(release.get("tag_name") or release.get("name"))
+        if not self._is_newer_version(version):
+            return None
+        body = release.get("body") or ""
+        checksums: Dict[str, str] = {}
+        if body:
+            self._extract_checksums_from_body(body, checksums)
+        assets = []
+        for asset in release.get("assets", []):
+            assets.append({
+                "name": asset.get("name", ""),
+                "download_url": asset.get("browser_download_url"),
+                "size": asset.get("size", 0),
+                "content_type": asset.get("content_type", "")
+            })
+        update_info = {
+            "version": version,
+            "name": release.get("name", version),
+            "body": body,
+            "published_at": release.get("published_at"),
+            "assets": assets,
+            "checksums": checksums,
+            "html_url": release.get("html_url"),
+            "prerelease": release.get("prerelease", False),
+            "raw": release
+        }
+        self._cache = update_info
+        self._cache_time = now
+        return update_info
 
 
 class AutoUpdater:
-    """自动更新器"""
-    
-    def __init__(self, github_repo: str, current_version: str):
-        """
-        初始化自动更新器
-        
-        Args:
-            github_repo: GitHub仓库地址
-            current_version: 当前版本号
-        """
+    '''High level update helper that exposes check/download/install.'''
+
+    def __init__(self, github_repo: str, current_version: str, official_build_only: bool = False) -> None:
         self.github_repo = github_repo
         self.current_version = current_version
+        self.official_build_only = official_build_only
         self.checker = UpdateChecker(github_repo, current_version)
+        self.update_callbacks: List[Callable[[str, Any], None]] = []
+        self.is_downloading = False
         self.download_progress = 0
         self.download_total = 0
-        self.is_downloading = False
-        self.update_callbacks = []
-        self.official_build_only = True
-        
-    def register_callback(self, callback: Callable):
-        """注册更新回调函数"""
+        self._download_path: Optional[Path] = None
+
+    def register_callback(self, callback: Callable[[str, Any], None]) -> None:
         self.update_callbacks.append(callback)
 
-    def _notify_callbacks(self, event: str, data: Any = None):
-        """通知所有回调函数"""
+    def _notify(self, event: str, data: Any = None) -> None:
         for callback in self.update_callbacks:
             try:
                 callback(event, data)
-            except Exception as e:
-                print(f"回调函数执行失败: {e}")
-
-    def _create_update_log(self, message: str, level: str = "INFO"):
-        """创建更新日志"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_message = f"[{timestamp}] [{level}] {message}"
-
-        # 写入日志文件
-        log_file = os.path.join(tempfile.gettempdir(), 'update.log')
-        try:
-            with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(log_message + '\n')
-        except Exception:
-            pass  # 忽略日志写入失败
-
-        # 同时输出到控制台
-        print(log_message)
-    
-    def _terminate_current_process(self, exit_code: int = 0, delay: float = 0.5) -> None:
-        """强制结束当前进程，尽可能释放文件锁。"""
-        try:
-            if delay > 0:
-                time.sleep(delay)
-        except Exception:
-            pass
-
-        # 刷新输出
-        for stream in (getattr(sys, 'stdout', None), getattr(sys, 'stderr', None)):
-            try:
-                if stream:
-                    stream.flush()
             except Exception:
                 pass
 
-        # 尝试退出Tk主循环，避免GUI阻塞
-        try:
-            import tkinter  # type: ignore
-            root = getattr(tkinter, "_default_root", None)
-            if root is not None:
-                try:
-                    root.quit()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    def check_for_updates(self, force: bool = False, include_prerelease: bool = False) -> Optional[Dict[str, Any]]:
+        self._notify('check_start', None)
+        info = self.checker.get_latest_update(force=force, include_prerelease=include_prerelease)
+        if info:
+            self._notify('update_available', info)
+        else:
+            self._notify('no_update', None)
+        return info
 
-        os._exit(exit_code)
-    
-    def check_for_updates(self, force: bool = False) -> Optional[Dict[str, Any]]:
-        """
-        检查更新
-        
-        Args:
-            force: 是否强制检查
-            
-        Returns:
-            更新信息
-        """
-        return self.checker.get_update_info() if self.checker.has_update(force) else None
-    
-    def _get_platform_asset(self, assets: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """
-        根据当前平台和CPU架构，从资产列表中选择最合适的更新文件。
-        采用打分制来选择最佳匹配项。
-        """
+    def _select_asset(self, update_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        assets = update_info.get('assets', []) or []
+        if not assets:
+            return None
         system = platform.system().lower()
         machine = platform.machine().lower()
 
-        # 平台和架构的关键字及其得分
-        platform_keywords = {
-            'windows': ['windows', 'win'],
-            'linux': ['linux'],
-            'darwin': ['macos', 'osx', 'darwin']
-        }
-        
-        arch_keywords = {
-            'x86_64': ['x64', 'amd64', 'x86_64'],
-            'arm64': ['arm64', 'aarch64']
-        }
-        
-        best_asset = None
-        highest_score = -1
+        def score(asset: Dict[str, Any]) -> int:
+            name = (asset.get('name') or '').lower()
+            s = 0
+            if system.startswith('win'):
+                if name.endswith('.exe'):
+                    s += 6
+                if name.endswith('.zip'):
+                    s += 5
+                if 'windows' in name or 'win' in name:
+                    s += 3
+            elif system == 'darwin':
+                if any(token in name for token in ('mac', 'darwin', 'osx')):
+                    s += 4
+                if name.endswith('.zip'):
+                    s += 3
+            else:
+                if 'linux' in name:
+                    s += 3
+                if name.endswith('.tar.gz') or name.endswith('.tgz'):
+                    s += 5
+                if name.endswith('.appimage'):
+                    s += 6
+            if any(token in machine for token in ('arm', 'aarch')) and any(token in name for token in ('arm', 'aarch', 'arm64')):
+                s += 2
+            if any(token in machine for token in ('x86_64', 'amd64')) and any(token in name for token in ('x86_64', 'x64', 'amd64')):
+                s += 2
+            if 'debug' in name:
+                s -= 2
+            return s
 
-        current_platform = None
-        for p, keys in platform_keywords.items():
-            if system in p:
-                current_platform = keys
-                break
-        
-        current_arch = None
-        for arch, keys in arch_keywords.items():
-            if arch in machine or (system == 'darwin' and 'arm' in machine): # macOS arm special case
-                current_arch = keys
-                break
-        
-        # 兼容x86
-        if not current_arch and ('x86' in machine or 'i686' in machine):
-            current_arch = arch_keywords['x86_64']
+        best = max(assets, key=score)
+        if score(best) <= 0:
+            return assets[0]
+        return best
 
-        for asset in assets:
-            name = asset.get('name', '').lower()
-            score = 0
-            
-            # 必须是压缩包
-            if not name.endswith(('.zip', '.tar.gz')):
-                continue
-
-            # 匹配平台
-            if current_platform:
-                for key in current_platform:
-                    if key in name:
-                        score += 5
-                        break
-            
-            # 匹配架构
-            if current_arch:
-                for key in current_arch:
-                    if key in name:
-                        score += 3
-                        break
-            
-            # 优先选择非debug版本
-            if 'debug' not in name:
-                score += 1
-
-            if score > highest_score:
-                highest_score = score
-                best_asset = asset
-
-        return best_asset
-    
-    def download_update(self, update_info: Dict[str, Any], 
-                       progress_callback: Optional[Callable] = None) -> Optional[str]:
-        """
-        下载更新
-        
-        Args:
-            update_info: 更新信息
-            progress_callback: 进度回调函数
-            
-        Returns:
-            下载的文件路径
-        """
-        # 仅允许官方发布版自动更新
+    def download_update(self, update_info: Dict[str, Any], progress_callback: Optional[Callable[[int, int], None]] = None) -> Optional[str]:
         if self.official_build_only and not is_official_release_build():
-            self._notify_callbacks('download_error', '当前为源码或非官方构建，已禁用自动更新')
+            self._notify('download_error', 'auto update is disabled for source builds')
             return None
         if self.is_downloading:
             return None
-        
-        # 检查更新锁
+
+        asset = self._select_asset(update_info)
+        if not asset or not asset.get('download_url'):
+            self._notify('download_error', 'no suitable asset')
+            return None
+
         update_lock = UpdateLock()
         if update_lock.is_locked():
-            self._notify_callbacks('download_error', '另一个更新进程正在运行，请稍后重试')
-            print("另一个更新进程正在运行，请稍后重试")
+            self._notify('download_error', 'another update is running')
             return None
-            
+
         if not update_lock.acquire(timeout=5):
-            self._notify_callbacks('download_error', '无法获取更新锁，可能有其他更新正在进行')
+            self._notify('download_error', 'could not acquire update lock')
             return None
-        
+
         self.is_downloading = True
-        self._notify_callbacks('download_start', update_info)
-        
+        self._notify('download_start', asset)
         try:
-            # 延迟导入 requests
             requests = _get_requests()
-            
-            # 选择合适的下载文件
-            asset = self._get_platform_asset(update_info['assets'])
-            if not asset:
-                raise Exception("没有找到适合当前平台的更新文件")
-            
-            # 创建临时文件
-            temp_dir = tempfile.gettempdir()
-            file_path = os.path.join(temp_dir, asset['name'])
-            
-            # 下载文件
             headers = {
                 'User-Agent': 'Tomato-Novel-Downloader',
                 'Accept': 'application/octet-stream'
@@ -712,1093 +440,347 @@ class AutoUpdater:
                 headers['Authorization'] = f'Bearer {token}'
             response = requests.get(asset['download_url'], headers=headers, stream=True, timeout=60)
             response.raise_for_status()
-            
-            self.download_total = int(response.headers.get('content-length', 0))
+
+            total = int(response.headers.get('content-length') or 0)
+            self.download_total = total
             self.download_progress = 0
-            
-            with open(file_path, 'wb') as f:
+            temp_dir = Path(tempfile.gettempdir())
+            file_path = temp_dir / asset['name']
+            with file_path.open('wb') as handle:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
-                        f.write(chunk)
+                        handle.write(chunk)
                         self.download_progress += len(chunk)
-                        
                         if progress_callback:
-                            progress_callback(self.download_progress, self.download_total)
-                        
-                        self._notify_callbacks('download_progress', {
+                            progress_callback(self.download_progress, total)
+                        percent = (self.download_progress / total * 100) if total else 0
+                        self._notify('download_progress', {
                             'current': self.download_progress,
-                            'total': self.download_total,
-                            'percent': (self.download_progress / self.download_total * 100) 
-                                      if self.download_total > 0 else 0
+                            'total': total,
+                            'percent': percent
                         })
-            
-            # 文件大小校验
-            if self.download_total > 0 and os.path.getsize(file_path) != self.download_total:
-                raise Exception("下载文件大小与预期不一致")
-            
-            # SHA256校验（如果有校验值）
-            if update_info.get('checksums'):
-                expected_hash = update_info['checksums'].get(asset['name'])
-                if expected_hash:
-                    self._notify_callbacks('download_progress', {
-                        'status': 'verifying',
-                        'message': '正在验证文件完整性...'
-                    })
-                    
-                    if not self.checker.verify_file_checksum(file_path, expected_hash):
-                        os.remove(file_path)  # 删除损坏的文件
-                        raise Exception("文件SHA256校验失败，可能文件已损坏")
-                    
-                    print(f"文件完整性验证通过")
-                else:
-                    print(f"警告：未找到文件 {asset['name']} 的SHA256校验值")
 
-            self._notify_callbacks('download_complete', file_path)
-            return file_path
-            
-        except ImportError as e:
-            error_msg = f"下载更新失败: 缺少依赖库 - {e}"
-            self._notify_callbacks('download_error', error_msg)
-            print(error_msg)
-            return None
-        except Exception as e:
-            self._notify_callbacks('download_error', str(e))
-            print(f"下载更新失败: {e}")
+            if total and file_path.stat().st_size != total:
+                raise RuntimeError('download size mismatch')
+
+            checksum_map = update_info.get('checksums') or {}
+            expected = checksum_map.get(asset['name']) if checksum_map else None
+            if expected:
+                digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
+                if digest.lower() != expected.lower():
+                    file_path.unlink(missing_ok=True)
+                    raise RuntimeError('SHA256 verification failed')
+
+            self._download_path = file_path
+            self._notify('download_complete', {'path': str(file_path)})
+            return str(file_path)
+        except Exception as exc:
+            self._notify('download_error', str(exc))
             return None
         finally:
             self.is_downloading = False
-            # 释放更新锁
             update_lock.release()
-    
+
+    def _target_root(self) -> Path:
+        if getattr(sys, 'frozen', False):
+            return Path(sys.executable).resolve().parent
+        return Path(os.path.abspath(sys.argv[0])).resolve().parent
+
+    def _restart_command(self) -> List[str]:
+        if getattr(sys, 'frozen', False):
+            return [sys.executable]
+        argv0 = os.path.abspath(sys.argv[0])
+        return [sys.executable, argv0] + sys.argv[1:]
+
+    @staticmethod
+    def _detect_payload_root(staging_root: Path) -> Path:
+        entries = [p for p in staging_root.iterdir() if not p.name.startswith('__MACOSX')]
+        if len(entries) == 1 and entries[0].is_dir():
+            return entries[0]
+        return staging_root
+
+    def _prepare_staging(self, update_path: Path) -> Dict[str, Path]:
+        staging_root = Path(tempfile.mkdtemp(prefix='tomato_stage_'))
+        payload_root = staging_root
+        try:
+            if update_path.is_dir():
+                shutil.copytree(update_path, staging_root / update_path.name, dirs_exist_ok=True)
+                payload_root = self._detect_payload_root(staging_root)
+            else:
+                name_lower = update_path.name.lower()
+                if name_lower.endswith('.zip'):
+                    with zipfile.ZipFile(update_path, 'r') as zf:
+                        zf.extractall(staging_root)
+                    payload_root = self._detect_payload_root(staging_root)
+                elif name_lower.endswith('.tar.gz') or name_lower.endswith('.tgz') or name_lower.endswith('.tar.xz'):
+                    mode = 'r:gz'
+                    if name_lower.endswith('.tar.xz'):
+                        mode = 'r:xz'
+                    with tarfile.open(update_path, mode) as tf:
+                        tf.extractall(staging_root)
+                    payload_root = self._detect_payload_root(staging_root)
+                else:
+                    shutil.copy2(update_path, staging_root / update_path.name)
+                    payload_root = staging_root
+        except Exception as exc:
+            shutil.rmtree(staging_root, ignore_errors=True)
+            raise RuntimeError(f'failed to extract update package: {exc}')
+        return {
+            'staging_root': staging_root,
+            'payload_root': payload_root
+        }
+
+    def _write_manifest(self, staging_root: Path, payload_root: Path, restart: bool) -> Path:
+        manifest = {
+            'staging_root': str(staging_root),
+            'payload_root': str(payload_root),
+            'target_root': str(self._target_root()),
+            'wait_pid': os.getpid(),
+            'restart': bool(restart),
+            'restart_cmd': self._restart_command() if restart else [],
+            'log_path': str(UPDATE_LOG_PATH),
+            'cleanup': True,
+            'created_at': time.time()
+        }
+        manifest_path = staging_root / 'update_manifest.json'
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+        return manifest_path
+
+    def _write_helper_script(self) -> Path:
+        helper_dir = Path(tempfile.mkdtemp(prefix='tomato_helper_'))
+        helper_path = helper_dir / HELPER_SCRIPT_BASENAME
+        helper_path.write_text(UPDATE_HELPER_SCRIPT, encoding='utf-8')
+        return helper_path
+
+    def _spawn_helper(self, helper_path: Path, manifest_path: Path) -> int:
+        cmd = [sys.executable, str(helper_path), '--manifest', str(manifest_path)]
+        creationflags = 0
+        if sys.platform.startswith('win'):
+            creationflags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0) | getattr(subprocess, 'DETACHED_PROCESS', 0)
+        proc = subprocess.Popen(cmd, creationflags=creationflags, close_fds=True)
+        return proc.pid
+
     def install_update(self, update_file: str, restart: bool = True) -> bool:
-        """
-        安装更新 - 优先使用外部更新机制
-
-        Args:
-            update_file: 更新文件路径
-            restart: 是否重启应用
-
-        Returns:
-            是否安装成功
-        """
-        try:
-            self._notify_callbacks('install_start', update_file)
-            self._create_update_log(f"开始安装更新: {update_file}")
-
-            # 预检查：确保更新文件存在且可读
-            if not os.path.exists(update_file):
-                raise Exception(f"更新文件不存在: {update_file}")
-
-            if not os.access(update_file, os.R_OK):
-                raise Exception(f"无法读取更新文件: {update_file}")
-
-            self._create_update_log(f"更新文件验证通过: {update_file}")
-
-            # 预检查：确保当前程序目录可写
-            current_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-            if not os.access(current_dir, os.W_OK):
-                raise Exception(f"程序目录无写入权限: {current_dir}")
-
-            self._create_update_log(f"程序目录权限检查通过: {current_dir}")
-            
-            # 优先使用外部更新器进行更新
-            if sys.platform == 'win32' and update_file.endswith('.exe'):
-                # Windows 可执行文件：使用外部更新器
-                self._create_update_log("使用外部更新器进行 Windows EXE 更新")
-                
-                # 创建更新信息，模拟下载完成后的状态  
-                update_info = {
-                    'version': 'manual_update',
-                    'name': 'Manual Update',
-                    'assets': [{
-                        'name': os.path.basename(update_file),
-                        'download_url': 'file:///' + os.path.abspath(update_file).replace('\\', '/'),
-                        'size': os.path.getsize(update_file),
-                        'content_type': 'application/octet-stream'
-                    }]
-                }
-                
-                # 直接调用外部更新机制
-                try:
-                    # 创建一个已下载完成的外部更新脚本
-                    self._launch_external_installer(update_file, restart)
-                except Exception as e:
-                    self._create_update_log(f"外部更新器启动失败，使用备用方案: {e}", "WARNING")
-                    # 备用方案
-                    self._install_windows_exe(update_file, restart)
-            elif update_file.endswith('.zip'):
-                # ZIP压缩包
-                self._create_update_log("使用ZIP压缩包更新模式")
-                self._install_from_zip(update_file, restart)
-            elif update_file.endswith('.tar.gz') or update_file.endswith('.tgz'):
-                # tarball 压缩包（常见于Linux）
-                self._create_update_log("使用TAR.GZ压缩包更新模式")
-                self._install_from_tarball(update_file, restart)
-            elif update_file.lower().endswith(('.appimage',)):
-                # AppImage 单文件
-                self._create_update_log("使用AppImage更新模式")
-                self._install_unix_single_file(update_file, restart)
-            else:
-                raise Exception(f"不支持的更新文件类型: {update_file}")
-
-            # 写入成功标记，供 GUI 判断更新成功
-            try:
-                self._create_update_log("更新成功完成")
-            except Exception:
-                pass
-
-            self._notify_callbacks('install_complete', None)
-            return True
-
-        except Exception as e:
-            error_msg = f"安装更新失败: {e}"
-            self._create_update_log(error_msg, "ERROR")
-            self._notify_callbacks('install_error', str(e))
-            print(error_msg)
+        update_path = Path(update_file)
+        if not update_path.exists():
+            self._notify('install_error', f'update file not found: {update_file}')
             return False
-    
-    def _launch_external_installer(self, update_file: str, restart: bool):
-        """启动外部安装程序（已下载完成的文件）"""
-        current_exe = sys.executable
-        current_pid = os.getpid()
-        
-        # 定义日志文件路径
-        log_file = os.path.join(tempfile.gettempdir(), 'tomato_update_debug.log')
-        
-        # 创建Windows批处理脚本，直接处理已下载的文件（调试模式）
-        batch_script = os.path.join(tempfile.gettempdir(), 'install_update.bat')
-        batch_content = f'''@echo off
-setlocal enabledelayedexpansion
-chcp 65001 >nul 2>&1
+        try:
+            _log(f'staging update from {update_path}', 'INFO')
+            staging_info = self._prepare_staging(update_path)
+            staging_root = staging_info['staging_root']
+            payload_root = staging_info['payload_root']
+            manifest_path = self._write_manifest(staging_root, payload_root, restart)
+            helper_path = self._write_helper_script()
+            self._notify('install_ready', {'manifest': str(manifest_path)})
+            helper_pid = self._spawn_helper(helper_path, manifest_path)
+            self._notify('helper_started', {'pid': helper_pid, 'manifest': str(manifest_path)})
+            _log(f'update helper started, pid={helper_pid}', 'INFO')
+            return True
+        except Exception as exc:
+            _log(f'install failed: {exc}', 'ERROR')
+            self._notify('install_error', str(exc))
+            return False
 
-set LOG_FILE="{log_file}"
-echo. >> %LOG_FILE%
-echo ================================================================== >> %LOG_FILE%
-echo [%date% %time%] [Updater] Starting external installer script. >> %LOG_FILE%
-echo ================================================================== >> %LOG_FILE%
+    def apply_release(self, update_info: Dict[str, Any], restart: bool = True) -> bool:
+        path = self.download_update(update_info)
+        if not path:
+            return False
+        success = self.install_update(path, restart=restart)
+        if success:
+            self._notify('install_scheduled', {'path': path})
+        return success
 
-echo [Updater] Update script started. See log for details: %LOG_FILE%
-echo.
-
-echo [%date% %time%] [Debug] Update File: {update_file} >> %LOG_FILE%
-echo [%date% %time%] [Debug] Target Executable: {current_exe} >> %LOG_FILE%
-echo [%date% %time%] [Debug] Main Process PID: {current_pid} >> %LOG_FILE%
-
-REM 等待主程序退出
-echo [%date% %time%] [Step 1/5] Waiting for main application to exit... >> %LOG_FILE%
-taskkill /PID {current_pid} /F >nul 2>&1
-echo [%date% %time%] [Debug] Taskkill command sent for PID {current_pid}. >> %LOG_FILE%
-timeout /t 3 /nobreak >nul
-
-REM 验证更新文件存在
-echo [%date% %time%] [Step 2/5] Verifying update file... >> %LOG_FILE%
-if not exist "{update_file}" (
-    echo [%date% %time%] [ERROR] Update file does not exist: {update_file} >> %LOG_FILE%
-    echo [Updater] ERROR: Update file not found.
-    pause
-    exit /b 1
-)
-echo [%date% %time%] [Debug] Update file found. Size: >> %LOG_FILE%
-dir "{update_file}" | find "{os.path.basename(update_file)}" >> %LOG_FILE%
-
-REM 备份当前文件
-echo [%date% %time%] [Step 3/5] Backing up current application... >> %LOG_FILE%
-if exist "{current_exe}" (
-    copy /y "{current_exe}" "{current_exe}.backup" >nul 2>&1
-    if errorlevel 1 (
-        echo [%date% %time%] [ERROR] Backup failed. >> %LOG_FILE%
-        echo [Updater] ERROR: Backup failed.
-        pause
-        exit /b 1
-    )
-    echo [%date% %time%] [Debug] Backup created successfully at "{current_exe}.backup" >> %LOG_FILE%
-) else (
-    echo [%date% %time%] [WARNING] Target executable not found, skipping backup. >> %LOG_FILE%
-)
-
-REM 替换文件（多种策略）
-echo [%date% %time%] [Step 4/5] Replacing application files... >> %LOG_FILE%
-set /a retry=0
-:retry_replace
-if !retry! geq 30 goto failed
-
-echo [%date% %time%] [Debug] Attempting to replace file (try !retry!/30)... >> %LOG_FILE%
-
-REM 尝试直接移动
-move /y "{update_file}" "{current_exe}" >nul 2>&1
-if not errorlevel 1 (
-    echo [%date% %time%] [Debug] Strategy 'move' successful. >> %LOG_FILE%
-    goto verify_success
-)
-
-REM 尝试删除后复制
-del /f /q "{current_exe}" >nul 2>&1
-timeout /t 1 /nobreak >nul
-copy /y "{update_file}" "{current_exe}" >nul 2>&1
-if not errorlevel 1 (
-    echo [%date% %time%] [Debug] Strategy 'del-copy' successful. >> %LOG_FILE%
-    del /f /q "{update_file}" >nul 2>&1
-    goto verify_success
-)
-
-set /a retry+=1
-if !retry! lss 30 (
-    timeout /t 1 /nobreak >nul
-    goto retry_replace
-)
-
-:failed
-echo [%date% %time%] [ERROR] Update failed after multiple retries. Restoring backup. >> %LOG_FILE%
-echo [Updater] ERROR: Update failed. Restoring backup.
-if exist "{current_exe}.backup" (
-    copy /y "{current_exe}.backup" "{current_exe}" >nul 2>&1
-    echo [%date% %time%] [Debug] Backup restored. >> %LOG_FILE%
-)
-echo.
-pause
-exit /b 1
-
-:verify_success
-echo [%date% %time%] [Step 5/5] Verifying update... >> %LOG_FILE%
-if exist "{current_exe}" (
-    echo [%date% %time%] [Debug] Target file exists. New size: >> %LOG_FILE%
-    dir "{current_exe}" | find "{os.path.basename(current_exe)}" >> %LOG_FILE%
-) else (
-    echo [%date% %time%] [ERROR] Target file not found after replacement. >> %LOG_FILE%
-    goto failed
-)
-
-:success
-echo [%date% %time%] [Cleanup] Cleaning up backup files... >> %LOG_FILE%
-if exist "{current_exe}.backup" del /f /q "{current_exe}.backup" >nul 2>&1
-echo [%date% %time%] [SUCCESS] Update completed successfully! >> %LOG_FILE%
-echo [Updater] SUCCESS: Update complete!
-
-if "{str(restart)}"=="True" (
-    echo [%date% %time%] [Restart] Restarting application... >> %LOG_FILE%
-    echo [Updater] Restarting application...
-    start "" "{current_exe}"
-    timeout /t 2 /nobreak >nul
-)
-
-echo Updater window will close in 5 seconds...
-timeout /t 5
-exit /b 0
-'''
-        
-        with open(batch_script, 'w', encoding='utf-8') as f:
-            f.write(batch_content)
-        
-        # 启动批处理脚本（显示窗口以便调试）
-        # 使用CREATE_NEW_CONSOLE创建新控制台窗口
-        CREATE_NEW_CONSOLE = 0x00000010
-        creationflags = CREATE_NEW_CONSOLE
-        subprocess.Popen(['cmd', '/c', batch_script], creationflags=creationflags)
-        
-        # 通知并退出
-        self._notify_callbacks('install_progress', '外部安装程序已启动（调试窗口），应用将退出以完成更新...')
-        self._terminate_current_process(delay=0.5)
-    
     def _start_force_update(self, update_info: Dict[str, Any]) -> None:
-        """启动强制更新流程：在外部脚本中进行下载与覆盖，当前进程只负责启动与退出。"""
-        try:
-            # 标记进行中，供GUI侧避免重复外部安装
-            setattr(self, '_force_update_in_progress', True)
-
-            # 更新信息序列化为 JSON，并准备目标可执行文件路径
-            update_info_json = json.dumps(update_info)
-            try:
-                target_exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
-            except Exception:
-                target_exe = sys.executable
-
-            # 获取当前进程PID
-            current_pid = os.getpid()
-
-            # 准备外部更新脚本
-            if getattr(sys, 'frozen', False):
-                # 打包后的情况：创建一个独立的Python脚本来执行更新
-                self._create_external_updater_script(update_info_json, target_exe, current_pid)
-            else:
-                # 源码运行：直接调用 Python 执行外部更新器
-                import external_updater
-                script_path = os.path.abspath(external_updater.__file__)
-                # 传递主程序PID作为第三个参数
-                args = [sys.executable, script_path, update_info_json, target_exe, str(current_pid)]
-                
-                if sys.platform == 'win32':
-                    # 使用CREATE_NEW_CONSOLE显示调试窗口
-                    CREATE_NEW_CONSOLE = 0x00000010
-                    creationflags = CREATE_NEW_CONSOLE
-                    subprocess.Popen(args, creationflags=creationflags)
-                else:
-                    subprocess.Popen(args)
-
-            # 通知并退出当前应用，交由外部脚本处理
-            self._notify_callbacks('install_progress', '外部更新程序已启动，应用将退出以完成更新...')
-            
-            # 复位状态标记
-            try:
-                setattr(self, '_force_update_in_progress', False)
-            except Exception:
-                pass
-            
-            # 使用安全退出方法
-            self._terminate_current_process(delay=1.0)
-        except Exception as e:
-            self._notify_callbacks('force_update_error', str(e))
-            print(f"启动外部更新失败: {e}")
-            try:
-                setattr(self, '_force_update_in_progress', False)
-            except Exception:
-                pass
-
-    def _create_external_updater_script(self, update_info_json: str, target_exe: str, current_pid: int = None):
-        """创建并运行外部更新脚本（用于打包后的exe）"""
-        if current_pid is None:
-            current_pid = os.getpid()
-        temp_dir = tempfile.gettempdir()
-        
-        # 创建Python更新脚本
-        updater_script = os.path.join(temp_dir, 'tomato_updater.py')
-        
-        # 将 external_updater.py 的内容复制过来（简化版）
-        script_content = '''#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-import sys
-import os
-import time
-import json
-import shutil
-import tempfile
-import subprocess
-
-def log_message(msg, level="INFO"):
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{timestamp}] [{level}] {msg}"
-    print(line)
-    try:
-        log_file = os.path.join(tempfile.gettempdir(), 'update.log')
-        with open(log_file, 'a', encoding='utf-8') as f:
-            f.write(line + '\\n')
-    except Exception:
-        pass
-
-def download_file(url, dest, headers=None):
-    """简单的文件下载函数"""
-    try:
-        import urllib.request
-        import urllib.error
-        
-        req = urllib.request.Request(url, headers=headers or {})
-        with urllib.request.urlopen(req, timeout=60) as response:
-            with open(dest, 'wb') as f:
-                shutil.copyfileobj(response, f)
-        return True
-    except Exception as e:
-        log_message(f"下载失败: {e}", "ERROR")
-        return False
-
-def main():
-    if len(sys.argv) < 3:
-        log_message("参数错误", "ERROR")
-        sys.exit(1)
-    
-    update_info = json.loads(sys.argv[1])
-    target_exe = sys.argv[2]
-    
-    # 获取主程序PID（如果传递了第三个参数）
-    main_pid = int(sys.argv[3]) if len(sys.argv) > 3 else None
-    
-    log_message(f"开始更新到版本: {update_info.get('version', 'unknown')}")
-    
-    # 等待主程序退出
-    if main_pid:
-        log_message(f"等待主程序(PID: {main_pid})退出...")
-        for i in range(60):  # 等待30秒
-            try:
-                # Windows: 检查进程是否存在
-                if sys.platform == 'win32':
-                    import ctypes
-                    kernel32 = ctypes.windll.kernel32
-                    SYNCHRONIZE = 0x00100000
-                    process = kernel32.OpenProcess(SYNCHRONIZE, 0, main_pid)
-                    if process == 0:
-                        log_message("主程序已退出")
-                        break
-                    kernel32.CloseHandle(process)
-                else:
-                    # Unix: 尝试发送信号0来检查进程
-                    os.kill(main_pid, 0)
-            except:
-                log_message("主程序已退出")
-                break
-            time.sleep(0.5)
-    else:
-        # 没有PID，简单等待几秒
-        log_message("等待主程序退出...")
-        time.sleep(3)
-    
-    # 下载新文件
-    assets = update_info.get('assets', [])
-    if not assets:
-        log_message("没有找到下载文件", "ERROR")
-        sys.exit(1)
-    
-    # 选择合适的文件（简化版：选择第一个exe文件）
-    download_url = None
-    for asset in assets:
-        if asset['name'].endswith('.exe'):
-            download_url = asset['download_url']
-            break
-    
-    if not download_url:
-        log_message("没有找到合适的更新文件", "ERROR")
-        sys.exit(1)
-    
-    # 下载到临时文件
-    temp_file = os.path.join(tempfile.gettempdir(), 'update_temp.exe')
-    log_message(f"下载更新文件: {download_url}")
-    
-    headers = {'User-Agent': 'Tomato-Novel-Downloader'}
-    if not download_file(download_url, temp_file, headers):
-        log_message("下载失败", "ERROR")
-        sys.exit(1)
-    
-    # 备份并替换文件
-    backup_file = target_exe + '.backup'
-    log_message(f"备份原文件: {backup_file}")
-    try:
-        if os.path.exists(target_exe):
-            shutil.copy2(target_exe, backup_file)
-    except Exception as e:
-        log_message(f"备份失败: {e}", "ERROR")
-    
-    # 替换文件
-    log_message(f"替换程序文件: {target_exe}")
-    max_retries = 10
-    for i in range(max_retries):
-        try:
-            if os.path.exists(target_exe):
-                os.remove(target_exe)
-            shutil.copy2(temp_file, target_exe)
-            log_message("更新成功完成")
-            break
-        except Exception as e:
-            if i == max_retries - 1:
-                log_message(f"替换失败: {e}", "ERROR")
-                # 恢复备份
-                if os.path.exists(backup_file):
-                    shutil.copy2(backup_file, target_exe)
-                sys.exit(1)
-            time.sleep(0.5)
-    
-    # 清理临时文件
-    try:
-        os.remove(temp_file)
-        if os.path.exists(backup_file):
-            os.remove(backup_file)
-    except:
-        pass
-    
-    # 重启程序
-    log_message("重启程序...")
-    if sys.platform == 'win32':
-        subprocess.Popen([target_exe], creationflags=subprocess.DETACHED_PROCESS)
-    else:
-        subprocess.Popen([target_exe])
-    
-    log_message("更新完成")
-    # 显示完成提示
-    print("\n" + "="*50)
-    print("更新完成！程序将自动重启...")
-    print("按任意键关闭此窗口...")
-    print("="*50)
-    input()
-
-if __name__ == "__main__":
-    main()
-'''
-        
-        with open(updater_script, 'w', encoding='utf-8') as f:
-            f.write(script_content)
-        
-        # 使用批处理启动Python脚本
-        batch_script = os.path.join(temp_dir, 'run_updater.bat')
-        batch_content = f'''@echo off
-setlocal enabledelayedexpansion
-chcp 65001 >nul 2>&1
-
-REM 等待主程序退出
-timeout /t 2 /nobreak >nul
-
-REM 查找Python
-set PYTHON_CMD=
-where python >nul 2>&1 && set "PYTHON_CMD=python"
-if not defined PYTHON_CMD where python3 >nul 2>&1 && set "PYTHON_CMD=python3"
-if not defined PYTHON_CMD where py >nul 2>&1 && set "PYTHON_CMD=py"
-
-if not defined PYTHON_CMD (
-    echo 未找到Python，尝试直接下载和替换
-    goto direct_update
-) else (
-    echo 使用Python执行更新
-    !PYTHON_CMD! "{updater_script}" {json.dumps(update_info_json)} "{target_exe}" {current_pid}
-    goto end
-)
-
-:direct_update
-REM 如果没有Python，使用PowerShell下载、可选SHA256校验并替换
-echo 使用PowerShell进行更新...
-powershell -ExecutionPolicy Bypass -Command "& {{
-    $updateInfo = '{update_info_json}' | ConvertFrom-Json
-    $targetExe = '{target_exe}'
-    $tempFile = [System.IO.Path]::GetTempPath() + 'update_temp.exe'
-    $expectedHash = $null
-    if ($updateInfo.checksums -ne $null) {{
-        foreach ($k in $updateInfo.checksums.Keys) {{ if ($k -like '*.exe') {{ $expectedHash = $updateInfo.checksums[$k]; break }} }}
-    }}
-    Start-Sleep -Seconds 2
-    $downloadUrl = $null
-    foreach ($asset in $updateInfo.assets) {{ if ($asset.name -like '*.exe') {{ $downloadUrl = $asset.download_url; break }} }}
-    if (-not $downloadUrl) {{ Write-Host '没有找到下载文件' -ForegroundColor Red; exit 1 }}
-    try {{
-        Write-Host "下载更新: $downloadUrl"
-        $client = New-Object System.Net.WebClient
-        $client.Headers['User-Agent'] = 'Tomato-Novel-Downloader'
-        $client.DownloadFile($downloadUrl, $tempFile)
-    }} catch {{ Write-Host "下载失败: $_" -ForegroundColor Red; exit 1 }}
-    if ($expectedHash) {{
-        try {{
-            $hash = (Get-FileHash -Path $tempFile -Algorithm SHA256).Hash.ToLower()
-            if ($hash -ne $expectedHash.ToLower()) {{
-                Write-Host "SHA256 校验失败`n 预期: $expectedHash`n 实际: $hash" -ForegroundColor Red
-                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
-                exit 1
-            }} else {{ Write-Host 'SHA256 校验通过' -ForegroundColor Green }}
-        }} catch {{ Write-Host "计算校验失败: $_" -ForegroundColor Red; exit 1 }}
-    }} else {{ Write-Host '未提供 SHA256 校验，跳过' -ForegroundColor Yellow }}
-    try {{
-        if (Test-Path $targetExe) {{ Copy-Item $targetExe "$targetExe.backup" -Force; Remove-Item $targetExe -Force }}
-        Copy-Item $tempFile $targetExe -Force
-        Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
-        Write-Host '更新成功完成' -ForegroundColor Green
-        Start-Process $targetExe
-    }} catch {{
-        Write-Host "替换失败: $_" -ForegroundColor Red
-        if (Test-Path "$targetExe.backup") {{ Copy-Item "$targetExe.backup" $targetExe -Force }}
-        exit 1
-    }}
-}}"
-
-:end
-echo.
-echo 更新完成！
-echo 按任意键关闭窗口...
-pause >nul
-exit /b 0
-'''
-        
-        with open(batch_script, 'w', encoding='gbk') as f:
-            f.write(batch_content)
-        
-        # 启动批处理脚本（显示窗口以便调试）
-        if sys.platform == 'win32':
-            # 使用CREATE_NEW_CONSOLE显示调试窗口
-            CREATE_NEW_CONSOLE = 0x00000010
-            creationflags = CREATE_NEW_CONSOLE
-            subprocess.Popen(['cmd', '/c', batch_script], creationflags=creationflags)
-        
-        self._notify_callbacks('install_progress', '外部更新程序已启动（调试窗口），应用将退出以完成更新...')
-
-    def _install_windows_exe(self, exe_path: str, restart: bool):
-        """安装Windows可执行文件（使用外部更新机制）"""
-        # 对于直接调用此方法的情况，使用外部更新器
-        try:
-            # 准备更新信息
-            update_info = {
-                'version': 'local_update',
-                'assets': [{
-                    'name': os.path.basename(exe_path),
-                    'download_url': 'file:///' + exe_path.replace('\\', '/'),
-                }]
-            }
-            
-            # 调用外部更新流程
-            self._start_force_update(update_info)
-        except Exception as e:
-            self._create_update_log(f"启动外部更新失败，使用备用方案: {e}", "WARNING")
-            
-            # 备用方案：使用简单的批处理
-            current_pid = os.getpid()
-            current_exe = sys.executable
-            
-            helper_script = f'''@echo off
-setlocal enabledelayedexpansion
-taskkill /PID {current_pid} /F >nul 2>&1
-timeout /t 3 /nobreak >nul
-move /y "{exe_path}" "{current_exe}" >nul 2>&1
-if errorlevel 1 (
-    del /f /q "{current_exe}" >nul 2>&1
-    copy /y "{exe_path}" "{current_exe}" >nul 2>&1
-)
-if "{restart}"=="True" start "" "{current_exe}"
-exit /b 0
-'''
-            
-            helper_path = os.path.join(tempfile.gettempdir(), 'quick_update.bat')
-            with open(helper_path, 'w', encoding='gbk') as f:
-                f.write(helper_script)
-            
-            # 使用CREATE_NEW_CONSOLE显示调试窗口
-            CREATE_NEW_CONSOLE = 0x00000010
-            creationflags = CREATE_NEW_CONSOLE
-            subprocess.Popen(['cmd', '/c', helper_path], creationflags=creationflags)
-            
-            self._notify_callbacks('install_progress', '更新程序已启动（调试窗口），应用将退出...')
-            self._terminate_current_process(delay=0.5)
-    
-    def _install_from_zip(self, zip_path: str, restart: bool):
-        """从ZIP文件安装更新"""
-        # 解压到临时目录
-        temp_extract_dir = os.path.join(tempfile.gettempdir(), 'update_extract')
-        os.makedirs(temp_extract_dir, exist_ok=True)
-        
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(temp_extract_dir)
-        
-        # 规范化解压出的可执行文件名称，确保覆盖当前正在运行的可执行文件名
-        try:
-            current_basename = os.path.basename(sys.executable)
-            self._normalize_extracted_binary_name(temp_extract_dir, current_basename)
-        except Exception as e:
-            print(f"规范化解压文件名失败: {e}")
-        
-        # 获取当前程序目录
-        app_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-        
-        # 创建更新脚本
-        if sys.platform == 'win32':
-            self._create_windows_update_script(temp_extract_dir, app_dir, restart)
-        else:
-            self._create_unix_update_script(temp_extract_dir, app_dir, restart)
-
-    def _normalize_extracted_binary_name(self, source_dir: str, target_basename: str) -> None:
-        """在解压目录中查找主要可执行文件并重命名为当前可执行文件名。
-        解决Release产物文件名包含版本号而导致无法覆盖原可执行文件的问题。
-        """
-        # macOS .app 包场景不处理此重命名
-        for item in os.listdir(source_dir):
-            if item.lower().endswith('.app') and os.path.isdir(os.path.join(source_dir, item)):
-                return
-        
-        candidates = []
-        for root, dirs, files in os.walk(source_dir):
-            for name in files:
-                try:
-                    path = os.path.join(root, name)
-                    lower_name = name.lower()
-                    # 以可执行权限、后缀或关键字作为候选
-                    if (
-                        lower_name.endswith('.exe') or
-                        'tomatonoveldownloader' in lower_name or
-                        os.access(path, os.X_OK)
-                    ):
-                        candidates.append(path)
-                except Exception:
-                    continue
-        if not candidates:
-            return
-        
-        # 选择最大的候选文件，通常为实际可执行文件
-        candidates.sort(key=lambda p: os.path.getsize(p) if os.path.exists(p) else 0, reverse=True)
-        src_path = candidates[0]
-        src_dir = os.path.dirname(src_path)
-        # 目标名直接使用当前正在运行的可执行文件名
-        target_path = os.path.join(src_dir, target_basename)
-        
-        # 已经同名则无需处理
-        if os.path.basename(src_path) == target_basename:
-            # 确保可执行权限
-            try:
-                if sys.platform != 'win32':
-                    os.chmod(src_path, 0o755)
-            except Exception:
-                pass
-            return
-        
-        # 重命名为目标名，覆盖已存在的文件
-        try:
-            if os.path.exists(target_path):
-                try:
-                    os.remove(target_path)
-                except Exception:
-                    pass
-            os.replace(src_path, target_path)
-            if sys.platform != 'win32':
-                try:
-                    os.chmod(target_path, 0o755)
-                except Exception:
-                    pass
-        except Exception as e:
-            # 失败则忽略，让后续脚本复制两个并保留旧名（虽然不会生效，但不影响当前运行）
-            print(f"重命名解压文件失败: {e}")
-    
-    def _create_windows_update_script(self, source_dir: str, target_dir: str, restart: bool):
-        """创建Windows更新脚本"""
-        current_pid = os.getpid()
-        exe_name = os.path.basename(sys.executable)
-
-        script = fr"""
-@echo off
-setlocal enabledelayedexpansion
-echo 等待程序退出...
-
-
-REM 强制结束当前进程
-taskkill /PID {current_pid} /F >nul 2>&1
-timeout /t 2 /nobreak > nul
-REM 等待进程完全退出，最多等待10秒
-set /a count=0
-:wait_loop
-tasklist /FI "PID eq {current_pid}" 2>nul | find "{current_pid}" >nul
-if errorlevel 1 goto process_ended
-set /a count+=1
-if %count% geq 10 (
-    echo 警告：程序未在预期时间内退出，强制终止进程
-    taskkill /PID {current_pid} /F >nul 2>&1
-    timeout /t 1 /nobreak > nul
-    goto process_ended
-)
-timeout /t 1 /nobreak > nul
-goto wait_loop
-
-:process_ended
-echo 开始更新程序文件...
-
-REM 创建备份目录
-if not exist "{target_dir}\\backup" mkdir "{target_dir}\\backup" 2>nul
-if errorlevel 1 (
-    echo 警告：无法创建备份目录，尝试继续更新
-)
-
-REM 备份重要文件
-if exist "{target_dir}\\{exe_name}" (
-    echo 创建备份...
-    copy "{target_dir}\\{exe_name}" "{target_dir}\\backup\\{exe_name}.backup" >nul 2>&1
-    if errorlevel 1 (
-        echo 警告：无法创建备份文件，尝试继续更新
-    ) else (
-        echo 备份文件已创建
-    )
-)
-
-REM 复制新文件
-echo 复制更新文件...
-xcopy /s /e /y /h /r "{source_dir}\\*" "{target_dir}\\" >nul 2>&1
-if %errorlevel% == 0 (
-    echo 更新成功完成
-    REM 清理临时文件
-    if exist "{source_dir}" (
-        rmdir /s /q "{source_dir}" 2>nul
-    )
-
-    REM 删除备份（更新成功后，带重试机制）
-    if exist "{target_dir}\\backup\\{exe_name}.backup" (
-        echo 清理备份文件...
-        set /a retry=0
-        :cleanup_backup_retry
-        del "{target_dir}\\backup\\{exe_name}.backup" 2>nul
-        if exist "{target_dir}\\backup\\{exe_name}.backup" (
-            set /a retry+=1
-            if !retry! lss 3 (
-                echo 重试删除备份文件 (!retry!/3)...
-                timeout /t 1 /nobreak > nul
-                goto cleanup_backup_retry
-            ) else (
-                echo 警告：无法删除备份文件，将在下次启动时清理
-            )
-        ) else (
-            echo 备份文件已清理
-        )
-    )
-
-    REM 清理空的备份目录
-    if exist "{target_dir}\\backup" (
-        dir /b "{target_dir}\\backup" 2>nul | findstr "." >nul
-        if errorlevel 1 (
-            rmdir "{target_dir}\\backup" 2>nul
-        )
-    )
-
-    if "{restart}" == "True" (
-        echo 重启程序...
-        cd /d "{target_dir}"
-        start "" "{exe_name}"
-        goto end_script
-    )
-) else (
-    echo 错误：文件复制失败，尝试恢复备份
-    if exist "{target_dir}\\backup\\{exe_name}.backup" (
-        copy "{target_dir}\\backup\\{exe_name}.backup" "{target_dir}\\{exe_name}" >nul 2>&1
-        if errorlevel 1 (
-            echo 错误：无法恢复备份文件
-        ) else (
-            echo 已恢复原程序文件
-        )
-    )
-    goto cleanup
-)
-
-:cleanup
-echo 更新失败，清理临时文件...
-
-:end_script
-REM 确保脚本文件存在后再删除
-if exist "%~f0" (
-    timeout /t 1 /nobreak > nul
-    del "%~f0" 2>nul
-)
-"""
-        script_file = os.path.join(tempfile.gettempdir(), 'update.bat')
-        with open(script_file, 'w', encoding='gbk') as f:  # 使用gbk编码避免中文乱码
-            f.write(script)
-
-        # 通知用户程序即将退出
-        self._notify_callbacks('install_progress', '程序即将退出以完成更新...')
-
-        subprocess.Popen(script_file, shell=True)
-        self._terminate_current_process(delay=0.5)
-    
-    def _create_unix_update_script(self, source_dir: str, target_dir: str, restart: bool):
-        """创建Unix更新脚本"""
-        current_pid = os.getpid()
-        exe_name = os.path.basename(sys.executable)
-
-        script = f"""#!/bin/bash
-echo "等待程序退出..."
-
-# 等待当前进程退出，最多等待30秒
-count=0
-while [ $count -lt 30 ]; do
-    if ! kill -0 {current_pid} 2>/dev/null; then
-        break
-    fi
-    count=$((count + 1))
-    sleep 1
-done
-
-if kill -0 {current_pid} 2>/dev/null; then
-    echo "警告：程序未在预期时间内退出，强制继续更新"
-fi
-
-echo "开始更新程序文件..."
-
-# 创建备份目录
-mkdir -p "{target_dir}/backup"
-
-# 备份重要文件
-if [ -f "{target_dir}/{exe_name}" ]; then
-    cp "{target_dir}/{exe_name}" "{target_dir}/backup/{exe_name}.backup" 2>/dev/null
-fi
-
-# 复制新文件
-if cp -rf "{source_dir}"/* "{target_dir}/"; then
-    echo "更新成功完成"
-    rm -rf "{source_dir}" 2>/dev/null
-    # 删除备份（更新成功后）
-    rm -rf "{target_dir}/backup" 2>/dev/null
-
-    if [ "{restart}" = "True" ]; then
-        echo "重启程序..."
-        cd "{target_dir}"
-        nohup ./{exe_name} > /dev/null 2>&1 &
-    fi
-else
-    echo "错误：更新失败，尝试恢复备份"
-    if [ -f "{target_dir}/backup/{exe_name}.backup" ]; then
-        cp "{target_dir}/backup/{exe_name}.backup" "{target_dir}/{exe_name}" 2>/dev/null
-        echo "已恢复原程序文件"
-    fi
-    read -p "按回车键继续..."
-fi
-
-rm -f "$0"
-"""
-
-        script_file = os.path.join(tempfile.gettempdir(), 'update.sh')
-        with open(script_file, 'w') as f:
-            f.write(script)
-
-        os.chmod(script_file, 0o755)
-
-        # 通知用户程序即将退出
-        self._notify_callbacks('install_progress', '程序即将退出以完成更新...')
-
-        subprocess.Popen(['/bin/bash', script_file])
-        self._terminate_current_process(delay=0.5)
-
-    def _install_from_tarball(self, tar_path: str, restart: bool):
-        """从tar.gz或tgz安装更新（Unix平台）"""
-        import tarfile
-        # 解压到临时目录
-        temp_extract_dir = os.path.join(tempfile.gettempdir(), 'update_extract')
-        os.makedirs(temp_extract_dir, exist_ok=True)
-        with tarfile.open(tar_path, 'r:gz') as tar:
-            tar.extractall(temp_extract_dir)
-        # 规范化可执行文件名称
-        try:
-            current_basename = os.path.basename(sys.executable)
-            self._normalize_extracted_binary_name(temp_extract_dir, current_basename)
-        except Exception as e:
-            print(f"规范化解压文件名失败: {e}")
-        # 生成脚本
-        app_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-        self._create_unix_update_script(temp_extract_dir, app_dir, restart)
-
-    def _install_unix_single_file(self, file_path: str, restart: bool):
-        """安装单文件（如AppImage），通过统一脚本复制覆盖"""
-        temp_extract_dir = os.path.join(tempfile.gettempdir(), 'update_extract')
-        os.makedirs(temp_extract_dir, exist_ok=True)
-        # 重命名为当前可执行文件名
-        target_basename = os.path.basename(sys.executable)
-        target_path = os.path.join(temp_extract_dir, target_basename)
-        try:
-            if os.path.exists(target_path):
-                os.remove(target_path)
-            shutil.copy2(file_path, target_path)
-            if sys.platform != 'win32':
-                os.chmod(target_path, 0o755)
-        except Exception as e:
-            raise Exception(f"准备单文件更新失败: {e}")
-        # 生成脚本
-        app_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-        self._create_unix_update_script(temp_extract_dir, app_dir, restart)
+        self.apply_release(update_info, restart=True)
 
     @staticmethod
     def check_update_status() -> Dict[str, Any]:
-        """
-        检查上次更新的状态
-
-        Returns:
-            更新状态信息
-        """
-        log_file = os.path.join(tempfile.gettempdir(), 'update.log')
         status = {
             'last_update_time': None,
             'update_success': False,
             'error_message': None,
-            'log_exists': False
+            'log_exists': UPDATE_LOG_PATH.exists()
         }
-
-        if os.path.exists(log_file):
-            status['log_exists'] = True
-            try:
-                with open(log_file, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-
-                # 分析最后几行日志（增强兼容性）
-                for line in reversed(lines[-50:]):  # 扩大到最后50行，提升容错
-                    try:
-                        text = line.strip()
-                        # 提取时间戳（以方括号包裹的第一段）
-                        import re
-                        ts_match = re.search(r'\[(.*?)\]', text)
-
-                        # 识别开始标记
-                        if ('开始安装更新' in text) or ('准备更新到版本' in text):
-                            if ts_match:
-                                status['last_update_time'] = ts_match.group(1)
-                            continue
-
-                        # 识别成功标记
-                        if ('更新成功完成' in text) or ('更新安装成功' in text):
-                            status['update_success'] = True
-                            continue
-
-                        # 识别错误标记
-                        if ('[ERROR]' in text or '安装失败' in text or '下载失败' in text or '更新失败' in text or '错误：' in text):
-                            # 尝试提取更友好的错误消息
-                            if '] ' in text:
-                                status['error_message'] = text.split('] ', 2)[-1].strip()
-                            else:
-                                # 去掉时间戳后返回剩余内容
-                                status['error_message'] = re.sub(r'^\[[^\]]+\]\s*', '', text)
-                            # 一旦检测到错误，仍继续扫描以获取可能的时间戳
-                            continue
-                    except Exception:
-                        # 忽略单行解析异常
-                        pass
-
-            except Exception as e:
-                status['error_message'] = f"读取更新日志失败: {e}"
-
+        if not status['log_exists']:
+            return status
+        try:
+            lines = UPDATE_LOG_PATH.read_text(encoding='utf-8').splitlines()
+        except Exception:
+            return status
+        for line in reversed(lines[-100:]):
+            text = line.strip()
+            if 'UPDATE_SUCCESS' in text or 'Update helper finished' in text:
+                status['update_success'] = True
+            if 'files' in text.lower() and 'updated' in text.lower():
+                if ']' in text:
+                    status['last_update_time'] = text.split(']')[0].strip('[')
+            if 'ERROR' in text:
+                status['error_message'] = text.split(']')[-1].strip()
         return status
 
     @staticmethod
-    def clear_update_log():
-        """清除更新日志"""
-        log_file = os.path.join(tempfile.gettempdir(), 'update.log')
+    def clear_update_log() -> None:
         try:
-            if os.path.exists(log_file):
-                os.remove(log_file)
+            UPDATE_LOG_PATH.unlink(missing_ok=True)
         except Exception:
             pass
 
 
-def get_current_version() -> str:
-    """
-    获取当前版本号
-    优先从 version.py 获取，其次回退到 config.py，最后默认值。
-    
-    Returns:
-        版本号字符串
-    """
-    # 优先：动态导入 version 模块（由 GitHub Actions 生成，包含准确版本）
+def check_and_notify_update(updater: AutoUpdater, callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> None:
+    def task():
+        info = updater.check_for_updates()
+        if info and callback:
+            callback(info)
+    threading.Thread(target=task, daemon=True).start()
+
+
+UPDATE_HELPER_SCRIPT = r'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Standalone helper that swaps in the downloaded update."""
+
+import argparse
+import json
+import os
+import sys
+import time
+import shutil
+import subprocess
+import tempfile
+import platform
+import stat
+from pathlib import Path
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Tomato Novel Downloader update helper")
+    parser.add_argument('--manifest', required=True, help='path to manifest json')
+    parser.add_argument('--timeout', type=int, default=90, help='seconds to wait for the main process')
+    return parser.parse_args()
+
+
+def _load_manifest(path: Path) -> dict:
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def _log(message: str, level: str = 'INFO', log_path: Optional[Path] = None) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{timestamp}] [{level}] {message}"
+    if log_path is None:
+        log_path = Path(tempfile.gettempdir()) / 'update.log'
     try:
-        import importlib
-        mod = importlib.import_module("version")
-        if hasattr(mod, "__version__"):
-            return str(getattr(mod, "__version__"))
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open('a', encoding='utf-8') as handle:
+            handle.write(line + "
+")
+    except Exception:
+        pass
+    print(line)
+
+
+def _process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        if platform.system().lower().startswith('win'):
+            import ctypes
+            SYNCHRONIZE = 0x00100000
+            handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, 0, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        else:
+            os.kill(pid, 0)
+            return True
+    except OSError:
+        return False
+
+
+def _wait_for_exit(pid: int, timeout: int, log_path: Path) -> None:
+    if pid <= 0:
+        return
+    _log(f'waiting for process {pid} to exit', 'INFO', log_path)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not _process_alive(pid):
+            _log('main process has exited', 'INFO', log_path)
+            time.sleep(1.5)
+            return
+        time.sleep(0.5)
+    if _process_alive(pid):
+        _log('timeout waiting for process, trying to terminate', 'WARNING', log_path)
+        try:
+            if platform.system().lower().startswith('win'):
+                subprocess.call(['taskkill', '/PID', str(pid), '/F', '/T'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                os.kill(pid, 9)
+        except Exception as exc:
+            _log(f'failed to terminate process: {exc}', 'WARNING', log_path)
+        time.sleep(1.5)
+
+
+def _ensure_writable(path: Path) -> None:
+    try:
+        if path.exists():
+            path.chmod(path.stat().st_mode | stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
     except Exception:
         pass
 
-    # 次优先：读取本地 version.py 文件
+
+def _copy_payload(payload_root: Path, target_root: Path, log_path: Path) -> None:
+    for src_dir, _, filenames in os.walk(payload_root):
+        rel = os.path.relpath(src_dir, payload_root)
+        dest_dir = target_root if rel == '.' else target_root / rel
+        Path(dest_dir).mkdir(parents=True, exist_ok=True)
+        for filename in filenames:
+            src_file = Path(src_dir) / filename
+            dest_file = Path(dest_dir) / filename
+            tmp_file = dest_file.with_suffix(dest_file.suffix + '.updatetmp')
+            if tmp_file.exists():
+                tmp_file.unlink()
+            shutil.copy2(src_file, tmp_file)
+            _ensure_writable(dest_file)
+            os.replace(tmp_file, dest_file)
+            _log(f'updated {dest_file}', 'DEBUG', log_path)
+
+
+def main():
+    args = _parse_args()
+    manifest = _load_manifest(Path(args.manifest))
+    log_path = Path(manifest.get('log_path') or (Path(tempfile.gettempdir()) / 'update.log'))
+    staging_root = Path(manifest['staging_root'])
+    payload_root = Path(manifest['payload_root'])
+    target_root = Path(manifest['target_root'])
+
+    _log('update helper started', 'INFO', log_path)
+    _wait_for_exit(int(manifest.get('wait_pid') or 0), args.timeout, log_path)
+
     try:
-        version_file = os.path.join(os.path.dirname(__file__), 'version.py')
-        if os.path.exists(version_file):
-            with open(version_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            for line in content.split('\n'):
-                if line.strip().startswith('__version__'):
-                    version_str = line.split('=')[1].strip().strip('\"\'')
-                    if version_str:
-                        return version_str
-    except Exception as e:
-        print(f"读取版本文件失败: {e}")
+        _copy_payload(payload_root, target_root, log_path)
+        _log('UPDATE_SUCCESS files applied', 'SUCCESS', log_path)
+    except Exception as exc:
+        _log(f'update failed: {exc}', 'ERROR', log_path)
+        sys.exit(1)
+    finally:
+        if manifest.get('cleanup', True):
+            shutil.rmtree(staging_root, ignore_errors=True)
+
+    if manifest.get('restart') and manifest.get('restart_cmd'):
+        cmd = manifest['restart_cmd']
+        try:
+            creationflags = 0
+            if platform.system().lower().startswith('win'):
+                creationflags = getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+            subprocess.Popen(cmd, creationflags=creationflags, close_fds=True)
+            _log('restart command launched', 'INFO', log_path)
+        except Exception as exc:
+            _log(f'failed to restart application: {exc}', 'WARNING', log_path)
+
+    _log('Update helper finished', 'INFO', log_path)
 
 
-def check_and_notify_update(updater: AutoUpdater, callback: Optional[Callable] = None):
-    """
-    后台检查更新并通知
-{{ ... }}
-    Args:
-        updater: 更新器实例
-        callback: 通知回调函数
-    """
-    def check():
-        update_info = updater.check_for_updates()
-        if update_info and callback:
-            callback(update_info)
-    
-    thread = threading.Thread(target=check, daemon=True)
-    thread.start()
+if __name__ == '__main__':
+    main()
+'''
 
-
-if __name__ == "__main__":
-    # 测试代码
-    updater = AutoUpdater("owner/repo", "1.0.0")
-    update_info = updater.check_for_updates()
-    if update_info:
-        print(f"发现新版本: {update_info['version']}")
-        print(f"更新内容: {update_info['body']}")

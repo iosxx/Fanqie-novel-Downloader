@@ -60,8 +60,8 @@ CONFIG = {
     },
     "download_enabled": True,
     "verbose_logging": False,
-    "async_batch_size": 30,
-    "connection_pool_size": 8,
+    "async_batch_size": 100,
+    "connection_pool_size": 100,
     "api_rate_limit": 5,
     "rate_limit_window": 1.0
 }

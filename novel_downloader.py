@@ -1741,7 +1741,8 @@ async def download_chapters_async(book_id, chapters_to_download, chapter_results
 
     # 由于批量API目前不可用，直接使用单章节下载
     # 但仍然保持异步并发以提高速度
-    batch_size = min(10, CONFIG.get("async_batch_size", 10))  # 限制并发数
+    # 调整并发批量大小，最多每批并发100章，可通过 config.py 的 async_batch_size 配置
+    batch_size = min(100, CONFIG.get("async_batch_size", 100))  # 限制并发数
     
     # 日志输出
     with print_lock:

@@ -1779,21 +1779,13 @@ def create_epub_book(name, author_name, description, chapter_results, chapters, 
     return book
 
 
-async def download_chapters_async(book_id, chapters_to_download, chapter_results, downloaded_ids, pbar, gui_callback=None):
-    """异步下载所有章节
-    Args:
-        book_id: 书籍ID
-        chapters_to_download: 待下载章节列表
-        chapter_results: 章节结果字典
-        downloaded_ids: 已下载章节ID集合
-        pbar: 进度条对象
-        gui_callback: GUI回调函数
-    """
+def download_chapters_in_batches(book_id, chapters_to_download, chapter_results, downloaded_ids, pbar, gui_callback=None):
+    """顺序批量下载章节（每批最大100章，无并发）。"""
     total_tasks = len(chapters_to_download)
     if total_tasks == 0:
         return
 
-    batch_size = min(100, CONFIG.get("async_batch_size", 100))  # 单批最多章节
+    batch_size = min(100, CONFIG.get("async_batch_size", 100))
 
     with print_lock:
         print(f"开始批量下载，总章节数: {total_tasks}, 每批最多: {batch_size}")
@@ -1802,80 +1794,72 @@ async def download_chapters_async(book_id, chapters_to_download, chapter_results
     failed_chapters = []
     total_batches = (total_tasks + batch_size - 1) // batch_size or 1
 
-    try:
-        for start in range(0, total_tasks, batch_size):
-            batch = chapters_to_download[start:start + batch_size]
-            current_batch = start // batch_size + 1
-            item_ids = [ch['id'] for ch in batch]
+    for start in range(0, total_tasks, batch_size):
+        batch = chapters_to_download[start:start + batch_size]
+        current_batch = start // batch_size + 1
+        item_ids = [ch['id'] for ch in batch]
 
-            results = await async_tomato_api.get_multi_content_async(book_id, item_ids)
-            result_map = {}
-            if results:
-                for item in results:
-                    item_id = str(item.get('item_id', '')).strip()
-                    if item_id:
-                        result_map[item_id] = item
+        results = tomato_api.get_multi_content(book_id, item_ids) or []
+        result_map = {str(item.get('item_id', '')).strip(): item for item in results if item}
 
-            if not result_map:
-                failed_chapters.extend(batch)
-                with print_lock:
-                    print(f"批量接口返回为空，批次 {current_batch}/{total_batches}")
-                for _ in batch:
-                    if pbar:
-                        pbar.update(1)
-                if gui_callback:
-                    progress = int((completed / total_tasks) * 80) + 10
-                    gui_callback(progress, f"下载进度 [{current_batch}/{total_batches}]: {completed}/{total_tasks}")
-                continue
-
-            for ch in batch:
-                chapter_id = str(ch['id'])
-                payload = result_map.get(chapter_id)
-                if payload:
-                    content = payload.get('content') or payload.get('text') or ''
-                    if content:
-                        processed = process_chapter_content(content)
-                        chapter_results[ch['index']] = {
-                            'base_title': ch['title'],
-                            'api_title': payload.get('title', ''),
-                            'content': processed
-                        }
-                        downloaded_ids.add(ch['id'])
-                        completed += 1
-                    else:
-                        failed_chapters.append(ch)
-                else:
-                    failed_chapters.append(ch)
-
+        if not result_map:
+            failed_chapters.extend(batch)
+            with print_lock:
+                print(f"批量接口返回为空，批次 {current_batch}/{total_batches}")
+            for _ in batch:
                 if pbar:
                     pbar.update(1)
-
             if gui_callback:
                 progress = int((completed / total_tasks) * 80) + 10
                 gui_callback(progress, f"下载进度 [{current_batch}/{total_batches}]: {completed}/{total_tasks}")
+            continue
 
-        if failed_chapters:
-            with print_lock:
-                print(f"\n批量下载失败章节数: {len(failed_chapters)}，尝试单章兜底...")
+        for ch in batch:
+            chapter_id = str(ch['id'])
+            payload = result_map.get(chapter_id)
+            if payload:
+                content = payload.get('content') or payload.get('text') or ''
+                if content:
+                    processed = process_chapter_content(content)
+                    chapter_results[ch['index']] = {
+                        'base_title': ch['title'],
+                        'api_title': payload.get('title', ''),
+                        'content': processed
+                    }
+                    downloaded_ids.add(ch['id'])
+                    completed += 1
+                else:
+                    failed_chapters.append(ch)
+            else:
+                failed_chapters.append(ch)
 
-            for ch in failed_chapters:
-                try:
-                    data = tomato_api.get_content(ch['id'])
-                    if data and data.get('content'):
-                        processed = process_chapter_content(data.get('content', ''))
-                        chapter_results[ch['index']] = {
-                            'base_title': ch['title'],
-                            'api_title': data.get('title', ''),
-                            'content': processed
-                        }
-                        downloaded_ids.add(ch['id'])
-                        completed += 1
-                        if pbar:
-                            pbar.update(1)
-                except Exception:
-                    pass
-    finally:
-        await async_tomato_api.close()
+            if pbar:
+                pbar.update(1)
+
+        if gui_callback:
+            progress = int((completed / total_tasks) * 80) + 10
+            gui_callback(progress, f"下载进度 [{current_batch}/{total_batches}]: {completed}/{total_tasks}")
+
+    if failed_chapters:
+        with print_lock:
+            print(f"\n批量下载失败章节数: {len(failed_chapters)}，尝试单章兜底...")
+
+        for ch in failed_chapters:
+            try:
+                data = tomato_api.get_content(ch['id'])
+                if data and data.get('content'):
+                    processed = process_chapter_content(data.get('content', ''))
+                    chapter_results[ch['index']] = {
+                        'base_title': ch['title'],
+                        'api_title': data.get('title', ''),
+                        'content': processed
+                    }
+                    downloaded_ids.add(ch['id'])
+                    completed += 1
+                    if pbar:
+                        pbar.update(1)
+            except Exception:
+                pass
 
     if gui_callback:
         progress = int((completed / total_tasks) * 80) + 10
@@ -2084,12 +2068,12 @@ def Run(book_id, save_path, file_format='txt', start_chapter=None, end_chapter=N
         chapter_results = {}
         lock = threading.Lock()
 
-        # 异步下载模式
+        # 批量下载模式（顺序处理，每批最多100章）
         if todo_chapters:
-            log_message(f"开始异步下载，共 {len(todo_chapters)} 个章节...")
+            log_message(f"开始批量下载，共 {len(todo_chapters)} 个章节...")
             disable_tqdm = gui_callback is not None
             with tqdm(total=len(todo_chapters), desc="下载进度", disable=disable_tqdm) as pbar:
-                asyncio.run(download_chapters_async(book_id, todo_chapters, chapter_results, downloaded, pbar, gui_callback))
+                download_chapters_in_batches(book_id, todo_chapters, chapter_results, downloaded, pbar, gui_callback)
             
             success_count = len(chapter_results)
             write_downloaded_chapters_in_order()

@@ -1,71 +1,71 @@
 # -*- coding: utf-8 -*-
 """
-配置管理模块 - 基于参考代码的简化版本
-包含版本信息和全局配置
+配置管理模块 - 包含版本信息和全局配置。
 """
 
-# ===================== 版本信息（从version.py合并）=====================
 __version__ = "1.0.0"
 __author__ = "Tomato Novel Downloader"
 __description__ = "A modern novel downloader with GitHub auto-update support"
 __github_repo__ = "POf-L/Fanqie-novel-Downloader"
 __build_time__ = "2025-01-23 00:00:00 UTC"
-# 构建通道：local(本地开发) / github-actions(官方发布) / custom(自定义构建)
 __build_channel__ = "custom"
 
-# 优先使用 GitHub Actions 注入的 version.py 中的元信息
 try:
-    import version as _ver
+    import version as _ver  # type: ignore
+except Exception:
+    _ver = None
+else:
     __version__ = getattr(_ver, "__version__", __version__)
     __author__ = getattr(_ver, "__author__", __author__)
     __description__ = getattr(_ver, "__description__", __description__)
     __github_repo__ = getattr(_ver, "__github_repo__", __github_repo__)
     __build_time__ = getattr(_ver, "__build_time__", __build_time__)
     __build_channel__ = getattr(_ver, "__build_channel__", __build_channel__)
-except Exception:
-    # 忽略导入失败，保持默认/本地值
-    pass
 
-# ===================== 导入模块 =====================
-import time
-import requests
-import bs4
-import re
-import os
 import random
-import json
-import urllib3
 import threading
-import signal
-import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
-from collections import OrderedDict
-from fake_useragent import UserAgent
-from typing import Optional, Dict
+from typing import Dict
 
-# 禁用SSL证书验证警告
+import requests
+import urllib3
+from fake_useragent import UserAgent
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 requests.packages.urllib3.disable_warnings()
 
-# 全局配置
 CONFIG = {
-    "max_workers": 2,  # API限制：每秒最多2个请求
-    "max_retries": 3,  # 重试次数
-    "request_timeout": 30,  # 请求超时时间
+    "max_workers": 2,
+    "max_retries": 3,
+    "request_timeout": 30,
     "status_file": "chapter.json",
-    "request_rate_limit": 0.5,  # 请求间隔：确保每秒不超过2个请求
-    "api_base_url": "https://api-return.cflin.ddns-ip.net",  # 新API基础URL
-    "api_endpoint": "/api/xiaoshuo/fanqie",  # 新API端点
-    "download_enabled": True,  # 启用章节下载功能
-    "verbose_logging": False,  # 是否启用详细日志输出（GUI环境建议关闭）
-    "async_batch_size": 2,  # 异步批量下载大小，符合API限制
-    "connection_pool_size": 4,  # HTTP连接池大小
-    "api_rate_limit": 2,  # API速率限制：每秒最多2个请求
-    "rate_limit_window": 1.0  # 速率限制时间窗口（秒）
+    "request_rate_limit": 0.5,
+    "api_base_url": "http://43.248.77.205:55555",
+    "api_endpoint": "/api/content",
+    "tomato_api_base": "http://43.248.77.205:55555",
+    "tomato_endpoints": {
+        "search": "/api/search",
+        "detail": "/api/detail",
+        "book": "/api/book",
+        "directory": "/api/directory",
+        "content": "/api/content",
+        "chapter": "/api/chapter",
+        "raw_full": "/api/raw_full",
+        "comment": "/api/comment",
+        "multi_content": "/api/content",
+        "ios_content": "/api/ios/content",
+        "ios_register": "/api/ios/register",
+        "device_pool": "/api/device/pool",
+        "device_register": "/api/device/register",
+        "device_status": "/api/device/status"
+    },
+    "download_enabled": True,
+    "verbose_logging": False,
+    "async_batch_size": 30,
+    "connection_pool_size": 8,
+    "api_rate_limit": 5,
+    "rate_limit_window": 1.0
 }
 
-# 全局锁
 print_lock = threading.Lock()
 
 _UA_SINGLETON = None
@@ -82,23 +82,18 @@ def _get_ua() -> UserAgent:
         with _UA_LOCK:
             if _UA_SINGLETON is None:
                 try:
-                    # 开启缓存，避免频繁网络拉取；提供可靠回退
                     _UA_SINGLETON = UserAgent(cache=True, fallback=random.choice(_DEFAULT_USER_AGENTS))
                 except Exception:
                     _UA_SINGLETON = None
     return _UA_SINGLETON
 
 def get_headers() -> Dict[str, str]:
-    """生成请求头（UA 单例缓存 + 本地回退）"""
+    """生成请求头（优先使用 fake_useragent，失败时回退到本地列表）。"""
     user_agent = None
     try:
         ua = _get_ua()
         if ua is not None:
-            # 在 chrome/edge 中择一，避免每次新建 UA
-            if random.choice(['chrome', 'edge']) == 'chrome':
-                user_agent = ua.chrome
-            else:
-                user_agent = ua.edge
+            user_agent = ua.chrome if random.choice(["chrome", "edge"]) == "chrome" else ua.edge
     except Exception:
         user_agent = None
 
@@ -114,7 +109,14 @@ def get_headers() -> Dict[str, str]:
         "Content-Type": "application/json"
     }
 
-# 导出配置、函数和版本信息
-__all__ = ['CONFIG', 'print_lock', 'get_headers',
-           '__version__', '__author__', '__description__', 
-           '__github_repo__', '__build_time__', '__build_channel__']
+__all__ = [
+    "CONFIG",
+    "print_lock",
+    "get_headers",
+    "__version__",
+    "__author__",
+    "__description__",
+    "__github_repo__",
+    "__build_time__",
+    "__build_channel__"
+]

@@ -81,33 +81,50 @@ class APIManager:
             搜索结果字典或None
         """
         try:
-            params = {"search": keyword}
-            response = self._get_session().get(self.full_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            # 使用新的搜索接口
+            search_url = f"{self.base_url}{CONFIG['tomato_endpoints']['search']}"
+            params = {"key": keyword, "tab_type": "3", "offset": "0"}
+            response = self._get_session().get(search_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
             
             if response.status_code == 200:
                 data = response.json()
                 
-                # 处理实际的API响应格式
-                if "data" in data:
-                    # 如果data是列表，直接返回
+                # 根据新API文档处理响应
+                if data.get("code") == 200 and "data" in data:
+                    # 解析嵌套的响应结构
+                    inner_data = data.get("data", {})
+                    if isinstance(inner_data, dict) and "search_tabs" in inner_data:
+                        # 查找书籍标签页 (tab_type = 3)
+                        search_tabs = inner_data.get("search_tabs", [])
+                        for tab in search_tabs:
+                            if tab.get("tab_type") == 3 and tab.get("data"):
+                                # 提取书籍数据
+                                books_data = []
+                                for item in tab.get("data", []):
+                                    if "book_data" in item and isinstance(item["book_data"], list):
+                                        books_data.extend(item["book_data"])
+                                
+                                return {
+                                    "code": 200,
+                                    "data": books_data,
+                                    "message": "success"
+                                }
+                    # 标准响应格式
+                    return data
+                elif "data" in data:
+                    # 兼容其他可能的格式
                     if isinstance(data["data"], list):
-                        return data
-                    # 如果data是字典且包含books
+                        return {
+                            "code": 200,
+                            "data": data["data"],
+                            "message": "success"
+                        }
                     elif isinstance(data["data"], dict) and "books" in data["data"]:
                         return {
-                            "code": data.get("code", 0),
+                            "code": 200,
                             "data": data["data"]["books"],
-                            "message": data.get("message", "")
+                            "message": "success"
                         }
-                    # 如果data是其他格式
-                    else:
-                        with print_lock:
-                            print(f"搜索响应格式不符: {type(data['data'])}")
-                        return None
-                
-                # 处理文档中描述的标准格式
-                elif data.get("code") == 0 and "data" in data:
-                    return data
                 else:
                     with print_lock:
                         print(f"搜索失败: {data.get('message', '未知响应格式')}")
@@ -128,26 +145,23 @@ class APIManager:
             书籍信息字典或None
         """
         try:
-            params = {"book": book_id}
-            response = self._get_session().get(self.full_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            # 使用新的详情接口
+            detail_url = f"{self.base_url}{CONFIG['tomato_endpoints']['detail']}"
+            params = {"book_id": book_id}
+            response = self._get_session().get(detail_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
             
             if response.status_code == 200:
                 data = response.json()
                 
-                # 处理实际的API响应格式
-                if "data" in data:
-                    # 如果data是字典，直接返回
+                # 根据新API文档处理响应
+                if data.get("code") == 200 and "data" in data:
+                    # 标准响应格式
                     if isinstance(data["data"], dict):
                         return data["data"]
-                    # 如果data是其他格式
                     else:
                         with print_lock:
                             print(f"书籍信息响应格式不符: {type(data['data'])}")
                         return None
-                        
-                # 处理文档中描述的标准格式
-                elif data.get("code") == 0 and "data" in data:
-                    return data["data"]
                 else:
                     with print_lock:
                         print(f"获取书籍信息失败: {data.get('message', '未知响应格式')}")
@@ -168,19 +182,26 @@ class APIManager:
             章节列表或None
         """
         try:
-            params = {"chapter": book_id}
-            response = self._get_session().get(self.full_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            # 使用新的目录接口
+            book_url = f"{self.base_url}{CONFIG['tomato_endpoints']['book']}"
+            params = {"book_id": book_id}
+            response = self._get_session().get(book_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
             
             if response.status_code == 200:
                 data = response.json()
                 
-                # 处理实际的API响应格式
-                if "data" in data:
+                # 根据新API文档处理响应 
+                if data.get("code") == 200 and "data" in data:
+                    # 兼容双层data：{code:200, data:{code:0, data:{...}}}
+                    inner = data.get("data")
+                    if isinstance(inner, dict) and "data" in inner and ("allItemIds" not in inner and "chapterListWithVolume" not in inner and "chapters" not in inner):
+                        inner = inner.get("data")
+                    
                     # 如果data是列表，直接返回
-                    if isinstance(data["data"], list):
+                    if isinstance(inner, list):
                         # 统一格式
                         formatted_chapters = []
-                        for ch in data["data"]:
+                        for ch in inner:
                             formatted_chapters.append({
                                 "chapter_id": ch.get("item_id", ch.get("chapter_id", "")),
                                 "chapter_name": ch.get("title", ch.get("chapter_name", "")),
@@ -188,8 +209,8 @@ class APIManager:
                             })
                         return formatted_chapters
                     # 如果data是字典且包含chapters
-                    elif isinstance(data["data"], dict) and "chapters" in data["data"]:
-                        chapters = data["data"]["chapters"]
+                    elif isinstance(inner, dict) and "chapters" in inner:
+                        chapters = inner["chapters"]
                         # 统一格式
                         formatted_chapters = []
                         for ch in chapters:
@@ -200,17 +221,58 @@ class APIManager:
                             })
                         
                         return formatted_chapters
+                    # 如果data是字典且包含新目录结构（allItemIds/chapterListWithVolume）
+                    elif isinstance(inner, dict) and ("allItemIds" in inner or "chapterListWithVolume" in inner):
+                        raw = inner
+                        formatted_chapters = []
+                        chapter_list_with_volume = raw.get("chapterListWithVolume", [])
+                        if chapter_list_with_volume:
+                            idx = 0
+                            for volume_chapters in chapter_list_with_volume:
+                                if isinstance(volume_chapters, list):
+                                    for ch in volume_chapters:
+                                        if isinstance(ch, dict):
+                                            item_id = ch.get("itemId") or ch.get("item_id") or ch.get("id")
+                                            title = ch.get("title") or ch.get("chapter_name") or f"第{idx+1}章"
+                                            if item_id:
+                                                formatted_chapters.append({
+                                                    "chapter_id": str(item_id),
+                                                    "chapter_name": title,
+                                                    "volume_name": ch.get("volume_name", "")
+                                                })
+                                                idx += 1
+                                elif isinstance(volume_chapters, dict):
+                                    chapters = volume_chapters.get("chapterList", [])
+                                    for ch in chapters:
+                                        item_id = ch.get("itemId") or ch.get("item_id") or ch.get("id")
+                                        title = ch.get("title") or ch.get("chapter_name") or f"第{idx+1}章"
+                                        if item_id:
+                                            formatted_chapters.append({
+                                                "chapter_id": str(item_id),
+                                                "chapter_name": title,
+                                                "volume_name": ch.get("volume_name", "")
+                                            })
+                                            idx += 1
+                        else:
+                            # 只有ID列表时（allItemIds），生成默认标题
+                            for idx, item_id in enumerate(raw.get("allItemIds", [])):
+                                if item_id:
+                                    formatted_chapters.append({
+                                        "chapter_id": str(item_id),
+                                        "chapter_name": f"第{idx+1}章",
+                                        "volume_name": ""
+                                    })
+                        return formatted_chapters if formatted_chapters else None
                     else:
                         with print_lock:
                             print(f"章节列表响应格式不符: {type(data['data'])}")
                         return None
                         
-                # 处理文档中描述的标准格式
-                elif data.get("code") == 0 and "data" in data:
-                    chapters = data["data"].get("chapters", [])
+                # 兼容其他格式
+                elif "data" in data and isinstance(data["data"], list):
                     # 统一格式
                     formatted_chapters = []
-                    for ch in chapters:
+                    for ch in data["data"]:
                         formatted_chapters.append({
                             "chapter_id": ch.get("item_id", ch.get("chapter_id", "")),
                             "chapter_name": ch.get("title", ch.get("chapter_name", "")),
@@ -237,26 +299,26 @@ class APIManager:
             章节内容字典或None
         """
         try:
-            params = {"content": chapter_id}
-            response = requests.get(self.full_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            # 使用新的内容接口
+            content_url = f"{self.base_url}{CONFIG['tomato_endpoints']['content']}"
+            params = {"tab": "小说", "item_id": chapter_id}
+            response = self._get_session().get(content_url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
             
             if response.status_code == 200:
                 data = response.json()
                 
-                # 处理实际的API响应格式
-                if "data" in data:
-                    # 如果data是字典，直接返回
+                # 根据新API文档处理响应
+                if data.get("code") == 200 and "data" in data:
+                    # 标准响应格式
                     if isinstance(data["data"], dict):
                         return data["data"]
-                    # 如果data是其他格式
+                    # 如果data直接是字符串（纯文本内容）
+                    elif isinstance(data["data"], str):
+                        return {"content": data["data"], "title": "", "item_id": chapter_id}
                     else:
                         with print_lock:
                             print(f"章节内容响应格式不符: {type(data['data'])}")
                         return None
-                        
-                # 处理文档中描述的标准格式
-                elif data.get("code") == 0 and "data" in data:
-                    return data["data"]
                 else:
                     with print_lock:
                         print(f"获取章节内容失败: {data.get('message', '未知响应格式')}")
@@ -275,23 +337,15 @@ class APIManager:
             True如果连接成功，False否则
         """
         try:
-            # 测试健康检查接口
-            health_url = f"{self.base_url}/health"
-            response = self._get_session().get(health_url, timeout=5)
+            # 测试搜索接口是否可用
+            search_url = f"{self.base_url}{CONFIG['tomato_endpoints']['search']}"
+            params = {"key": "测试", "tab_type": "3", "offset": "0"}
+            response = self._get_session().get(search_url, params=params, timeout=5)
             
             if response.status_code == 200:
                 data = response.json()
-                if data.get("status") == "healthy":
+                if data.get("code") == 200:
                     # 静默成功，减少输出
-                    return True
-            
-            # 如果健康检查失败，尝试获取服务信息
-            info_url = self.base_url + "/"
-            response = self._get_session().get(info_url, timeout=5)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("status") == "running":
                     return True
                     
             return False
@@ -301,6 +355,368 @@ class APIManager:
 
 # 全局API管理器实例
 api_manager = APIManager()
+
+class TomatoAPI:
+    """对接 cenguigui 番茄 API 的同步客户端"""
+
+    def __init__(self):
+        self.base_url = CONFIG.get("tomato_api_base", "")
+        self.endpoints = CONFIG.get("tomato_endpoints", {})
+        self._tls = threading.local()
+
+    def _get_session(self) -> requests.Session:
+        sess = getattr(self._tls, 'session', None)
+        if sess is None:
+            sess = requests.Session()
+            retries = Retry(
+                total=CONFIG.get("max_retries", 3),
+                backoff_factor=0.3,
+                status_forcelist=(429, 500, 502, 503, 504),
+                allowed_methods=("GET",),
+                raise_on_status=False,
+            )
+            adapter = HTTPAdapter(
+                pool_connections=CONFIG.get("connection_pool_size", 4),
+                pool_maxsize=CONFIG.get("connection_pool_size", 4),
+                max_retries=retries,
+                pool_block=False
+            )
+            sess.mount('http://', adapter)
+            sess.mount('https://', adapter)
+            sess.headers.update({'Connection': 'keep-alive'})
+            self._tls.session = sess
+        return sess
+
+    def _url(self, key: str) -> str:
+        return f"{self.base_url}{self.endpoints.get(key, '')}"
+
+    def test_connection(self) -> bool:
+        try:
+            url = self._url('search')
+            params = {"key": "测试", "tab_type": "3", "offset": "0"}
+            r = self._get_session().get(url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def search(self, keyword: str, offset: int = 0) -> Optional[Dict]:
+        """搜索书籍
+        Args:
+            keyword: 搜索关键词
+            offset: 偏移量
+        Returns:
+            搜索结果字典
+        """
+        try:
+            url = self._url('search')
+            params = {"key": keyword, "tab_type": "3", "offset": str(offset or 0)}
+            resp = self._get_session().get(url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+
+            books_list = []
+            
+            # 处理新的search_tabs格式
+            if 'search_tabs' in data and isinstance(data['search_tabs'], list):
+                for tab in data['search_tabs']:
+                    if not isinstance(tab, dict):
+                        continue
+                    
+                    # 检查tab中的data字段
+                    tab_data = tab.get('data', [])
+                    if not isinstance(tab_data, list):
+                        continue
+                    
+                    # 遍历每个数据项
+                    for item in tab_data:
+                        if not isinstance(item, dict):
+                            continue
+                        
+                        # 获取book_data
+                        book_data = item.get('book_data', [])
+                        if not isinstance(book_data, list):
+                            continue
+                        
+                        # 处理每本书
+                        for book in book_data:
+                            book_id = book.get('book_id') or book.get('id')
+                            if book_id:
+                                books_list.append({
+                                    'book_id': str(book_id),
+                                    'book_name': book.get('book_name') or book.get('title') or '',
+                                    'author': book.get('author') or book.get('author_name') or '未知作者',
+                                    'intro': book.get('abstract') or book.get('intro') or '',
+                                    'cover': book.get('thumb_url') or book.get('cover_url') or '',
+                                    'category': book.get('category') or '',
+                                    'word_count': book.get('word_number') or '',
+                                    'chapter_count': book.get('serial_count') or '',
+                                    'status': book.get('creation_status') or ''
+                                })
+            
+            # 如果没有search_tabs，尝试直接从 data 字段获取
+            elif 'data' in data:
+                raw = data['data']
+                candidates = []
+                if isinstance(raw, list):
+                    candidates = raw
+                elif isinstance(raw, dict):
+                    for key in ['books', 'items', 'results', 'list']:
+                        if isinstance(raw.get(key), list):
+                            candidates = raw.get(key)
+                            break
+                
+                for it in candidates:
+                    book_id = it.get('book_id') or it.get('id')
+                    if book_id:
+                        books_list.append({
+                            'book_id': str(book_id),
+                            'book_name': it.get('book_name') or it.get('title') or '',
+                            'author': it.get('author') or it.get('author_name') or '未知作者',
+                            'intro': it.get('abstract') or it.get('intro') or '',
+                            'cover': it.get('thumb_url') or it.get('cover_url') or '',
+                            'category': it.get('category') or '',
+                            'word_count': it.get('word_number') or '',
+                            'chapter_count': it.get('serial_count') or '',
+                            'status': it.get('creation_status') or ''
+                        })
+
+            return {"books": books_list, "raw": data}
+        except Exception as e:
+            with print_lock:
+                print(f"搜索异常: {str(e)}")
+            return None
+
+    def get_book_detail(self, book_id: str) -> Optional[Dict]:
+        try:
+            url = self._url('detail')
+            params = {"book_id": book_id}
+            resp = self._get_session().get(url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            raw = data.get('data', data)
+            if isinstance(raw, dict):
+                return {
+                    'book_id': str(raw.get('book_id') or book_id),
+                    'book_name': raw.get('book_name') or raw.get('title') or '',
+                    'original_book_name': raw.get('original_book_name') or '',
+                    'author': raw.get('author') or raw.get('author_name') or '未知作者',
+                    'intro': raw.get('intro') or raw.get('abstract') or raw.get('desc') or '',
+                    'cover': raw.get('cover') or raw.get('cover_url') or raw.get('thumb_url') or ''
+                }
+            return None
+        except Exception:
+            return None
+
+    def get_all_items(self, book_id: str) -> Optional[list]:
+        """优先调用 book 接口获取目录，必要时回退到直接访问 book_id"""
+        headers = get_headers()
+        try:
+            # 先尝试 book 接口
+            url = self._url('book')
+            params = {"book_id": book_id}
+            resp = self._get_session().get(url, params=params, headers=headers, timeout=CONFIG["request_timeout"])
+            if resp.status_code == 200:
+                data = resp.json()
+                
+                if data.get('code') == 200 and 'data' in data:
+                    raw = data['data']
+                    # 兼容双层data：{code:200, data:{code:0, data:{...}}}
+                    if isinstance(raw, dict) and 'data' in raw and ("allItemIds" not in raw and "chapterListWithVolume" not in raw and not isinstance(raw.get('data'), list)):
+                        raw = raw.get('data')
+                    items = []
+                    
+                    # 处理新格式：{"allItemIds": [...], "volumeNameList": [...], "chapterListWithVolume": [...]}
+                    if isinstance(raw, dict) and 'allItemIds' in raw:
+                        all_item_ids = raw.get('allItemIds', [])
+                        # 检查是否有 chapterListWithVolume 提供详细信息
+                        chapter_list_with_volume = raw.get('chapterListWithVolume', [])
+                        
+                        # 如果有章节详细信息
+                        if chapter_list_with_volume:
+                            idx = 0
+                            # chapterListWithVolume 是一个嵌套数组 [[chapters_of_vol1], [chapters_of_vol2], ...]
+                            for volume_chapters in chapter_list_with_volume:
+                                if isinstance(volume_chapters, list):
+                                    # 遍历该卷的章节
+                                    for ch in volume_chapters:
+                                        if isinstance(ch, dict):
+                                            # 注意字段名是 itemId 不是 item_id
+                                            item_id = ch.get('itemId') or ch.get('item_id') or ch.get('id')
+                                            title = ch.get('title') or ch.get('chapter_name') or f"第{idx+1}章"
+                                            if item_id:
+                                                items.append({
+                                                    'item_id': str(item_id),
+                                                    'title': title,
+                                                    'index': idx
+                                                })
+                                                idx += 1
+                                # 如果volume_chapters是字典格式（兼容其他可能的格式）
+                                elif isinstance(volume_chapters, dict):
+                                    chapters = volume_chapters.get('chapterList', [])
+                                    for ch in chapters:
+                                        item_id = ch.get('itemId') or ch.get('item_id') or ch.get('id')
+                                        title = ch.get('title') or ch.get('chapter_name') or f"第{idx+1}章"
+                                        if item_id:
+                                            items.append({
+                                                'item_id': str(item_id),
+                                                'title': title,
+                                                'index': idx
+                                            })
+                                            idx += 1
+                        else:
+                            # 只有ID列表，生成默认标题
+                            for idx, item_id in enumerate(all_item_ids):
+                                if item_id:
+                                    items.append({
+                                        'item_id': str(item_id),
+                                        'title': f"第{idx+1}章",
+                                        'index': idx
+                                    })
+                        
+                        if items:
+                            return items
+                    
+                    # 处理旧格式（直接是章节列表）
+                    elif isinstance(raw, list):
+                        for idx, ch in enumerate(raw):
+                            item_id = ch.get('item_id') or ch.get('chapter_id') or ch.get('id')
+                            title = ch.get('title') or ch.get('chapter_name') or f"第{idx+1}章"
+                            if item_id:
+                                items.append({
+                                    'item_id': str(item_id),
+                                    'title': title,
+                                    'index': idx
+                                })
+                        if items:
+                            return items
+                    
+        except Exception as e:
+            with print_lock:
+                print(f"all_items接口异常: {str(e)}")
+        
+        # 回退到directory接口
+        try:
+            url = self._url('directory')
+            params = {"book_id": book_id, "fq_id": book_id}  # 同时传递book_id与fq_id以提高兼容性
+            resp = self._get_session().get(url, params=params, headers=headers, timeout=CONFIG["request_timeout"])
+            
+            if resp.status_code != 200:
+                return None
+            
+            data = resp.json()
+            if data.get('code') not in [0, 200] or not data.get('data'):
+                return None
+            
+            raw = data['data']
+            items = []
+            
+            # 处理简化目录格式
+            if isinstance(raw, list):
+                for idx, ch in enumerate(raw):
+                    item_id = ch.get('item_id') or ch.get('id')
+                    title = ch.get('title') or ch.get('chapter_name') or f"第{idx+1}章"
+                    if item_id:
+                        items.append({
+                            'item_id': str(item_id),
+                            'title': title,
+                            'index': idx
+                        })
+            
+            return items if items else None
+            
+        except Exception as e:
+            with print_lock:
+                print(f"catalog接口异常: {str(e)}")
+            return None
+
+    def get_content(self, item_id: str) -> Optional[Dict]:
+        try:
+            url = self._url('content')
+            params = {"tab": "小说", "item_id": item_id}
+            resp = self._get_session().get(url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            raw = data.get('data', data)
+            if isinstance(raw, dict):
+                content = raw.get('content') or raw.get('text') or ''
+                title = raw.get('chapter_name') or raw.get('title') or ''
+                return {'item_id': str(item_id), 'title': title, 'content': content}
+            return None
+        except Exception:
+            return None
+
+    def get_multi_content(self, book_id: str, item_ids: list) -> Optional[list]:
+        """批量获取章节内容
+        Args:
+            book_id: 书籍ID
+            item_ids: 章节ID列表
+        Returns:
+            章节内容列表或None
+        """
+        try:
+            url = self._url('multi_content')
+            # 使用新的批量接口参数
+            params = {"tab": "批量", "item_ids": ','.join(map(str, item_ids)), "book_id": book_id}
+            resp = self._get_session().get(url, params=params, headers=get_headers(), timeout=CONFIG["request_timeout"])
+            if resp.status_code != 200:
+                with print_lock:
+                    print(f"批量获取章节内容失败，状态码: {resp.status_code}")
+                return None
+            data = resp.json()
+            
+            # 检查返回数据格式
+            if data.get('code') != 200:
+                with print_lock:
+                    print(f"批量获取失败: {data.get('message', '未知错误')}")
+                return None
+                
+            raw = data.get('data', [])
+            results = []
+            
+            # 支持多种返回格式
+            if isinstance(raw, list):
+                # 直接是数组格式
+                for it in raw:
+                    iid = str(it.get('item_id', ''))
+                    title = it.get('chapter_name') or it.get('title') or ''
+                    content = it.get('content') or it.get('text') or ''
+                    if iid and content:
+                        results.append({'item_id': iid, 'title': title, 'content': content})
+            elif isinstance(raw, dict):
+                # 可能为 { item_id: {content, ...}, ... } 格式
+                for key, val in raw.items():
+                    if isinstance(val, dict):
+                        content = val.get('content') or val.get('text') or ''
+                        title = val.get('chapter_name') or val.get('title') or ''
+                        if content:
+                            results.append({
+                                'item_id': str(key),
+                                'title': title,
+                                'content': content
+                            })
+            
+            # 确保返回的章节顺序与请求顺序一致
+            if results:
+                result_map = {r['item_id']: r for r in results}
+                ordered_results = []
+                for iid in item_ids:
+                    if str(iid) in result_map:
+                        ordered_results.append(result_map[str(iid)])
+                return ordered_results if ordered_results else results
+            
+            return results if results else None
+            
+        except Exception as e:
+            with print_lock:
+                print(f"批量获取章节内容异常: {str(e)}")
+            return None
+
+
+# 全局 Tomato API 实例
+tomato_api = TomatoAPI()
 
 class AsyncAPIManager:
     """异步API管理器，使用 aiohttp - 带速率限制版"""
@@ -361,15 +777,18 @@ class AsyncAPIManager:
                 self.last_request_time = time.time()
             
             session = await self._get_session()
-            params = {"content": chapter_id}
+            params = {"tab": "小说", "item_id": chapter_id}
             
             for attempt in range(max_retries):
                 try:
                     async with session.get(self.full_url, params=params) as response:
                         if response.status == 200:
                             data = await response.json()
-                            if "data" in data and isinstance(data["data"], dict):
-                                return data["data"]
+                            if data.get("code") == 200 and "data" in data:
+                                if isinstance(data["data"], dict):
+                                    return data["data"]
+                                if isinstance(data["data"], str):
+                                    return {"content": data["data"], "title": "", "item_id": chapter_id}
                         elif response.status == 429:  # 速率限制
                             await asyncio.sleep(min(2 ** attempt, 10))  # 指数退避
                             continue
@@ -399,6 +818,103 @@ class AsyncAPIManager:
 
 # 全局异步API管理器实例
 async_api_manager = AsyncAPIManager()
+
+class AsyncTomatoAPI:
+    """对接 cenguigui 番茄 API 的异步客户端（仅实现批量正文）"""
+    def __init__(self):
+        self.base_url = CONFIG.get("tomato_api_base", "")
+        self.endpoints = CONFIG.get("tomato_endpoints", {})
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=CONFIG["request_timeout"], connect=5, sock_read=20)
+            connector = aiohttp.TCPConnector(
+                limit=CONFIG.get("connection_pool_size", 4),
+                limit_per_host=CONFIG.get("connection_pool_size", 4),
+                ttl_dns_cache=300,
+                enable_cleanup_closed=True,
+                keepalive_timeout=30
+            )
+            self._session = aiohttp.ClientSession(headers=get_headers(), timeout=timeout, connector=connector, trust_env=True)
+        return self._session
+
+    def _url(self, key: str) -> str:
+        return f"{self.base_url}{self.endpoints.get(key, '')}"
+
+    async def close(self):
+        if self._session:
+            await self._session.close()
+
+    async def get_multi_content_async(self, book_id: str, item_ids: list) -> Optional[list]:
+        """异步批量获取章节内容
+        Args:
+            book_id: 书籍ID
+            item_ids: 章节ID列表
+        Returns:
+            章节内容列表或None
+        """
+        try:
+            session = await self._get_session()
+            url = self._url('multi_content')
+            params = {"tab": "批量", "item_ids": ','.join(map(str, item_ids)), "book_id": book_id}
+
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    with print_lock:
+                        print(f"异步批量获取失败，状态码: {resp.status}")
+                    return None
+
+                data = await resp.json()
+
+                if data.get('code') != 200:
+                    with print_lock:
+                        print(f"异步批量获取失败: {data.get('message', '未知错误')}")
+                    return None
+
+                raw = data.get('data', [])
+                results = []
+
+                if isinstance(raw, list):
+                    for it in raw:
+                        iid = str(it.get('item_id', ''))
+                        title = it.get('chapter_name') or it.get('title') or ''
+                        content = it.get('content') or it.get('text') or ''
+                        if iid and content:
+                            results.append({'item_id': iid, 'title': title, 'content': content})
+                elif isinstance(raw, dict):
+                    for key, val in raw.items():
+                        if isinstance(val, dict):
+                            content = val.get('content') or val.get('text') or ''
+                            title = val.get('chapter_name') or val.get('title') or ''
+                            if content:
+                                results.append({
+                                    'item_id': str(key),
+                                    'title': title,
+                                    'content': content
+                                })
+
+                if results:
+                    result_map = {r['item_id']: r for r in results}
+                    ordered_results = []
+                    for iid in item_ids:
+                        if str(iid) in result_map:
+                            ordered_results.append(result_map[str(iid)])
+                    return ordered_results if ordered_results else results
+
+                return results if results else None
+
+        except asyncio.TimeoutError:
+            with print_lock:
+                print("异步批量获取超时")
+            return None
+        except Exception as e:
+            with print_lock:
+                print(f"异步批量获取异常: {str(e)}")
+            return None
+
+# 全局异步 Tomato API 实例
+async_tomato_api = AsyncTomatoAPI()
 
 # ===================== 原有的小说下载功能 =====================
 
@@ -466,25 +982,21 @@ def down_text(chapter_id, headers, book_id=None):
 
 
 def get_chapters_from_api(book_id, headers):
-    """从API获取章节列表 - 使用新API"""
+    """从新番茄API获取章节列表（优先 all_items.php 回退 catalog.php）"""
     try:
-        # 使用新API获取章节列表
-        chapters = api_manager.get_chapter_list(book_id)
-        
-        if chapters:
-            final_chapters = []
-            for idx, chapter in enumerate(chapters):
-                final_chapters.append({
-                    "id": chapter.get("chapter_id", f"{book_id}_{idx+1}"),
-                    "title": chapter.get("chapter_name", f"第{idx+1}章"),
-                    "index": idx
-                })
-            return final_chapters
-        else:
+        items = tomato_api.get_all_items(book_id)
+        if not items:
             with print_lock:
                 print("无法获取章节列表")
             return None
-            
+        final_chapters = []
+        for ch in items:
+            final_chapters.append({
+                "id": ch.get("item_id", ""),
+                "title": ch.get("title", ""),
+                "index": ch.get("index", 0)
+            })
+        return final_chapters
     except Exception as e:
         with print_lock:
             print(f"获取章节列表失败: {str(e)}")
@@ -492,7 +1004,7 @@ def get_chapters_from_api(book_id, headers):
 
 
 def get_book_info(book_id, headers, gui_callback=None):
-    """获取书名、作者、简介、封面URL - 使用新API"""
+    """获取书名、作者、简介、封面URL - 优先使用 cenguigui API"""
     
     def log_message(message, progress=-1):
         """输出日志消息"""
@@ -503,8 +1015,8 @@ def get_book_info(book_id, headers, gui_callback=None):
                 print(message)
 
     try:
-        # 使用新API获取书籍详情
-        book_details = api_manager.get_book_details(book_id)
+        # 优先使用 cenguigui API 获取书籍详情
+        book_details = tomato_api.get_book_detail(book_id)
         
         if book_details:
             # 从新API获取书籍信息
@@ -1207,98 +1719,143 @@ def create_epub_book(name, author_name, description, chapter_results, chapters, 
     return book
 
 
-async def download_chapters_async(chapters_to_download, chapter_results, downloaded_ids, pbar, gui_callback=None):
-    """异步下载所有章节 - 速率限制版"""
+async def download_chapters_async(book_id, chapters_to_download, chapter_results, downloaded_ids, pbar, gui_callback=None):
+    """异步下载所有章节
+    Args:
+        book_id: 书籍ID
+        chapters_to_download: 待下载章节列表
+        chapter_results: 章节结果字典
+        downloaded_ids: 已下载章节ID集合
+        pbar: 进度条对象
+        gui_callback: GUI回调函数
+    """
     total_tasks = len(chapters_to_download)
-    completed_tasks = 0
-    failed_chapters = []
-    batch_size = CONFIG.get("async_batch_size", 2)  # 遵守API限制
-    
-    # 预热连接池
-    await async_api_manager.warmup_connection_pool()
-    
-    # 批量处理章节（每批2个，符合API限制）
-    for batch_start in range(0, total_tasks, batch_size):
-        batch_end = min(batch_start + batch_size, total_tasks)
-        batch_chapters = chapters_to_download[batch_start:batch_end]
-        
-        # 创建批量任务
-        tasks = []
-        for chapter in batch_chapters:
-            task = asyncio.create_task(
-                download_single_chapter(chapter, chapter_results, downloaded_ids)
-            )
-            tasks.append((task, chapter))
-        
-        # 等待批量任务完成
-        for task, chapter in tasks:
-            try:
-                success = await task
-                if not success:
-                    failed_chapters.append(chapter)
-            except Exception as e:
-                failed_chapters.append(chapter)
-            finally:
-                completed_tasks += 1
-                if pbar:
-                    pbar.update(1)
-                if gui_callback:
-                    progress = int((completed_tasks / total_tasks) * 80) + 10
-                    gui_callback(progress, f"下载中: {completed_tasks}/{total_tasks}")
-    
-    # 重试失败的章节（最多重试一次）
-    if failed_chapters:
-        retry_msg = f"重试失败的 {len(failed_chapters)} 个章节..."
-        if gui_callback:
-            gui_callback(-1, retry_msg)
-        else:
-            with print_lock:
-                print(retry_msg)
-        
-        retry_tasks = []
-        for chapter in failed_chapters:
-            task = asyncio.create_task(
-                download_single_chapter(chapter, chapter_results, downloaded_ids, is_retry=True)
-            )
-            retry_tasks.append((task, chapter))
-        
-        # 等待重试任务
-        for task, chapter in retry_tasks:
-            try:
-                await task
-            except:
-                pass  # 重试失败就放弃
-    
-    await async_api_manager.close()
+    if total_tasks == 0:
+        return
 
+    # 由于批量API目前不可用，直接使用单章节下载
+    # 但仍然保持异步并发以提高速度
+    batch_size = min(10, CONFIG.get("async_batch_size", 10))  # 限制并发数
+    
+    # 日志输出
+    with print_lock:
+        print(f"开始下载，总章节数: {total_tasks}, 并发数: {batch_size}")
+
+    completed = 0
+    failed_chapters = []
+    
+    # 分批处理以控制并发
+    for start in range(0, total_tasks, batch_size):
+        batch = chapters_to_download[start:start + batch_size]
+        current_batch = start // batch_size + 1
+        total_batches = (total_tasks + batch_size - 1) // batch_size
+        
+        # 使用异步并发下载单个章节
+        tasks = []
+        for ch in batch:
+            task = asyncio.create_task(download_single_chapter_async(ch['id']))
+            tasks.append((task, ch))
+        
+        # 等待所有任务完成
+        for task, ch in tasks:
+            try:
+                result = await task
+                if result:
+                    content = result.get('content', '')
+                    if content:
+                        processed = process_chapter_content(content)
+                        chapter_results[ch['index']] = {
+                            'base_title': ch['title'],
+                            'api_title': result.get('title', ''),
+                            'content': processed
+                        }
+                        downloaded_ids.add(ch['id'])
+                        completed += 1
+                    else:
+                        failed_chapters.append(ch)
+                else:
+                    failed_chapters.append(ch)
+            except Exception as e:
+                failed_chapters.append(ch)
+                if CONFIG.get('verbose_logging', False):
+                    with print_lock:
+                        print(f"章节 {ch['title']} 下载异常: {str(e)}")
+            
+            if pbar:
+                pbar.update(1)
+        
+        # 更新进度
+        if gui_callback:
+            progress = int((completed / total_tasks) * 80) + 10
+            gui_callback(progress, f"下载进度 [{current_batch}/{total_batches}]: {completed}/{total_tasks}")
+    
+    # 重试失败的章节
+    if failed_chapters:
+        with print_lock:
+            print(f"\n开始重试 {len(failed_chapters)} 个失败章节...")
+        
+        for ch in failed_chapters:
+            try:
+                data = tomato_api.get_content(ch['id'])
+                if data and data.get('content'):
+                    processed = process_chapter_content(data.get('content', ''))
+                    chapter_results[ch['index']] = {
+                        'base_title': ch['title'],
+                        'api_title': data.get('title', ''),
+                        'content': processed
+                    }
+                    downloaded_ids.add(ch['id'])
+                    completed += 1
+                    if pbar:
+                        pbar.update(1)
+            except Exception:
+                pass  # 重试失败，忽略
+    
+    # 最终统计
+    if gui_callback:
+        progress = int((completed / total_tasks) * 80) + 10
+        gui_callback(progress, f"下载完成: {completed}/{total_tasks}")
+    
+    with print_lock:
+        if failed_chapters:
+            final_failed = [ch for ch in failed_chapters if ch['id'] not in downloaded_ids]
+            if final_failed:
+                print(f"最终有 {len(final_failed)} 个章节下载失败")
+        print(f"成功下载 {len(downloaded_ids)} 个章节")
+
+    await async_tomato_api.close()
+
+
+async def download_single_chapter_async(item_id: str) -> Optional[Dict]:
+    """异步下载单个章节
+    Args:
+        item_id: 章节ID
+    Returns:
+        章节内容字典或None
+    """
+    try:
+        # 使用异步包装同步调用
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, tomato_api.get_content, item_id)
+        return data
+    except Exception:
+        return None
 
 async def download_single_chapter(chapter, chapter_results, downloaded_ids, is_retry=False):
-    """下载单个章节的辅助函数"""
+    """兼容旧流程的单章下载"""
     try:
-        # 如果是重试，延迟更长时间避免触发速率限制
-        if is_retry:
-            await asyncio.sleep(random.uniform(1.0, 2.0))
-        
-        chapter_data = await async_api_manager.get_chapter_content_async(chapter["id"])
-        
-        if chapter_data:
-            content = chapter_data.get("content", "")
-            title = chapter_data.get("chapter_name", "")
-            
-            # 异步处理内容（避免阻塞）
-            processed_content = await asyncio.get_event_loop().run_in_executor(
-                None, process_chapter_content, content
-            )
-            
+        data = await download_single_chapter_async(chapter["id"])
+        if data and data.get('content'):
+            processed_content = process_chapter_content(data.get('content', ''))
             chapter_results[chapter["index"]] = {
                 "base_title": chapter["title"],
-                "api_title": title,
+                "api_title": data.get("title", ""),
                 "content": processed_content
             }
             downloaded_ids.add(chapter["id"])
             return True
         return False
-    except Exception as e:
+    except Exception:
         return False
 
 def Run(book_id, save_path, file_format='txt', start_chapter=None, end_chapter=None, gui_callback=None):
@@ -1410,11 +1967,14 @@ def Run(book_id, save_path, file_format='txt', start_chapter=None, end_chapter=N
             description = "无简介"
             cover_url = None
         
-        # 获取别名信息（从同一个API调用）
+        # 获取别名信息（沿用番茄API详情）
         original_name = None
-        book_details = api_manager.get_book_details(book_id)
-        if book_details:
-            original_name = book_details.get("original_book_name", name)
+        try:
+            details_for_alias = tomato_api.get_book_detail(book_id)
+            if details_for_alias:
+                original_name = details_for_alias.get("original_book_name", name)
+        except Exception:
+            original_name = None
         
         # 如果没有获取到封面URL，尝试其他方法
         if not cover_url:
@@ -1466,7 +2026,7 @@ def Run(book_id, save_path, file_format='txt', start_chapter=None, end_chapter=N
             log_message(f"开始异步下载，共 {len(todo_chapters)} 个章节...")
             disable_tqdm = gui_callback is not None
             with tqdm(total=len(todo_chapters), desc="下载进度", disable=disable_tqdm) as pbar:
-                asyncio.run(download_chapters_async(todo_chapters, chapter_results, downloaded, pbar, gui_callback))
+                asyncio.run(download_chapters_async(book_id, todo_chapters, chapter_results, downloaded, pbar, gui_callback))
             
             success_count = len(chapter_results)
             write_downloaded_chapters_in_order()
@@ -1545,26 +2105,28 @@ class NovelDownloaderAPI:
 
     def initialize_api(self):
         """初始化API，测试连接"""
-        # 测试新API连接
-        if api_manager.test_connection():
-            if self.gui_verification_callback and len(inspect.signature(self.gui_verification_callback).parameters) > 1:
-                self.gui_verification_callback(10, "API连接成功")
-            return True
-        else:
-            if self.gui_verification_callback and len(inspect.signature(self.gui_verification_callback).parameters) > 1:
-                self.gui_verification_callback(-1, "API连接失败，请检查网络")
-            return False
+        # 优先测试番茄API连接，失败则回退测试旧聚合API
+        ok = False
+        try:
+            ok = tomato_api.test_connection()
+        except Exception:
+            ok = False
+        if not ok:
+            try:
+                ok = api_manager.test_connection()
+            except Exception:
+                ok = False
+        if self.gui_verification_callback and len(inspect.signature(self.gui_verification_callback).parameters) > 1:
+            self.gui_verification_callback(10 if ok else -1, "API连接成功" if ok else "API连接失败，请检查网络")
+        return ok
 
     def search_novels(self, keyword, offset=0, tab_type=1):
-        """搜索小说 - 使用新API"""
+        """搜索小说 - 接入 cenguigui 番茄 API"""
         try:
-            # 使用新API搜索
-            search_results = api_manager.search_books(keyword)
-            
+            search_results = tomato_api.search(keyword, offset=offset or 0)
             if search_results:
                 items = []
                 books = search_results.get("books", [])
-                
                 for book in books:
                     items.append({
                         "book_id": book.get("book_id", ""),
@@ -1582,30 +2144,21 @@ class NovelDownloaderAPI:
                         "tomato_book_status": book.get("status", ""),
                         "source": "api"
                     })
-                
                 return {
                     "success": True,
                     "data": {
                         "items": items,
-                        "has_more": search_results.get("page", 1) < (search_results.get("total", 0) // search_results.get("page_size", 20)),
+                        "has_more": False,
                         "next_offset": offset + len(items),
                         "search_keyword": keyword,
                         "source": "api"
                     }
                 }
-            else:
-                return {
-                    "success": False,
-                    "data": {"items": [], "has_more": False, "next_offset": offset + 10}
-                }
-                
+            return {"success": False, "data": {"items": [], "has_more": False, "next_offset": offset}}
         except Exception as e:
             with print_lock:
                 print(f"搜索异常: {str(e)}")
-            return {
-                "success": False,
-                "data": {"items": [], "has_more": False, "next_offset": offset + 10}
-            }
+            return {"success": False, "data": {"items": [], "has_more": False, "next_offset": offset}}
 
     def get_novel_info(self, book_id):
         """获取小说信息"""

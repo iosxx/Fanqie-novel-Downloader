@@ -39,7 +39,7 @@ CONFIG = {
     "request_timeout": 30,
     "status_file": "chapter.json",
     "request_rate_limit": 0.5,
-    "api_base_url": "http://43.248.77.205:55555",
+    "api_base_url": "http://101.34.64.209:9999",
     "api_endpoint": "/api/content",
     "tomato_api_base": "http://43.248.77.205:55555",
     "tomato_endpoints": {

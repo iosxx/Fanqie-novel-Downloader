@@ -165,12 +165,17 @@ jobs:
           $version = "${{ needs.version.outputs.version }}"
           $exeName = "${{ matrix.executable }}${{ matrix.ext }}"
           $setupName = "${{ matrix.executable }}-Setup-$version.exe"
+          
+          # Convert paths to forward slashes for NSIS
+          $distPath = (Get-Location).Path.Replace('\', '/') + '/dist'
+          $exePath = "$distPath/$exeName"
+          $outPath = "$distPath/$setupName"
 
           # Use single-quoted here-string so NSIS $vars are not expanded by PowerShell
           $nsi = @'
           !define APPNAME "Tomato Novel Downloader"
           !define VERSION "__VERSION__"
-          OutFile "dist/__SETUP_NAME__"
+          OutFile "__OUTFILE__"
           InstallDir "$PROGRAMFILES64\TomatoNovelDownloader"
           RequestExecutionLevel admin
 
@@ -181,7 +186,7 @@ jobs:
 
           Section "Install"
             SetOutPath "$INSTDIR"
-            File "/oname=TomatoNovelDownloader.exe" "dist/__EXE_NAME__"
+            File "/oname=TomatoNovelDownloader.exe" "__EXEFILE__"
             CreateDirectory "$SMPROGRAMS\TomatoNovelDownloader"
             CreateShortcut "$SMPROGRAMS\TomatoNovelDownloader\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"
             CreateShortcut "$DESKTOP\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"
@@ -202,8 +207,8 @@ jobs:
           SectionEnd
           '@
 
-          # Replace placeholders with actual names
-          $nsi = $nsi.Replace('__VERSION__', $version).Replace('__SETUP_NAME__', $setupName).Replace('__EXE_NAME__', $exeName)
+          # Replace placeholders with actual names and paths
+          $nsi = $nsi.Replace('__VERSION__', $version).Replace('__OUTFILE__', $outPath).Replace('__EXEFILE__', $exePath)
 
           Set-Content -Path installer.nsi -Value $nsi -Encoding ASCII
           if (-not (Test-Path "dist\$exeName")) { throw "Built exe not found: dist\$exeName" }

@@ -23,7 +23,10 @@ _requests = None
 _packaging_version = None
 
 UPDATE_LOG_PATH = Path(tempfile.gettempdir()) / "update.log"
-HELPER_SCRIPT_BASENAME = "tomato_update_helper.py"
+# Helper script names for different environments
+HELPER_SCRIPT_BASENAME_PY = "tomato_update_helper.py"
+HELPER_SCRIPT_BASENAME_PS1 = "tomato_update_helper.ps1"
+HELPERSCRIPT_DEFAULT_NAME = HELPER_SCRIPT_BASENAME_PY
 
 
 def _ensure_dependencies() -> bool:
@@ -402,6 +405,9 @@ class AutoUpdater:
                     s += 5
                 if 'windows' in name or 'win' in name:
                     s += 3
+                # Prefer plain binaries over installers for auto-update
+                if 'setup' in name or 'installer' in name:
+                    s -= 4
             elif system == 'darwin':
                 if any(token in name for token in ('mac', 'darwin', 'osx')):
                     s += 4
@@ -568,16 +574,42 @@ class AutoUpdater:
         return manifest_path
 
     def _write_helper_script(self) -> Path:
+        """Create a platform-appropriate helper in a temp directory.
+
+        - For frozen Windows builds: emit a PowerShell helper script to avoid
+          relying on a system Python interpreter (which may not exist).
+        - Otherwise: emit the Python helper script and invoke with sys.executable.
+        """
         helper_dir = Path(tempfile.mkdtemp(prefix='tomato_helper_'))
-        helper_path = helper_dir / HELPER_SCRIPT_BASENAME
-        helper_path.write_text(UPDATE_HELPER_SCRIPT, encoding='utf-8')
+        if sys.platform.startswith('win') and getattr(sys, 'frozen', False):
+            helper_path = helper_dir / HELPER_SCRIPT_BASENAME_PS1
+            helper_path.write_text(UPDATE_HELPER_SCRIPT_PS1, encoding='utf-8')
+        else:
+            helper_path = helper_dir / HELPERSCRIPT_DEFAULT_NAME
+            helper_path.write_text(UPDATE_HELPER_SCRIPT, encoding='utf-8')
         return helper_path
 
     def _spawn_helper(self, helper_path: Path, manifest_path: Path) -> int:
-        cmd = [sys.executable, str(helper_path), '--manifest', str(manifest_path)]
+        """Launch the helper process detached.
+
+        Windows frozen builds spawn PowerShell to run a ps1 helper script.
+        Other environments use the current Python executable to run a .py helper.
+        """
         creationflags = 0
         if sys.platform.startswith('win'):
             creationflags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0) | getattr(subprocess, 'DETACHED_PROCESS', 0)
+
+        if helper_path.suffix.lower() == '.ps1':
+            # PowerShell helper on Windows
+            cmd = [
+                'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                '-File', str(helper_path),
+                '-Manifest', str(manifest_path)
+            ]
+        else:
+            # Python helper (source runs or non-Windows)
+            cmd = [sys.executable, str(helper_path), '--manifest', str(manifest_path)]
+
         proc = subprocess.Popen(cmd, creationflags=creationflags, close_fds=True)
         return proc.pid
 
@@ -671,6 +703,7 @@ import tempfile
 import platform
 import stat
 from pathlib import Path
+from typing import Optional
 
 
 def _parse_args():
@@ -805,3 +838,108 @@ if __name__ == '__main__':
     main()
 '''
 
+# PowerShell helper used for Windows frozen builds to avoid requiring a system Python.
+UPDATE_HELPER_SCRIPT_PS1 = r"""
+param(
+    [Parameter(Mandatory=$true)][string]$Manifest,
+    [int]$Timeout = 90
+)
+
+function Write-Log {
+    param([string]$Message, [string]$Level = 'INFO', [string]$LogPath)
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line = "[$timestamp] [$Level] $Message"
+    try {
+        if (-not [string]::IsNullOrEmpty($LogPath)) {
+            $dir = Split-Path -Parent $LogPath
+            if ($dir) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            Add-Content -Path $LogPath -Value $line -Encoding UTF8
+        }
+    } catch {}
+    Write-Output $line
+}
+
+function Wait-ForExit {
+    param([int]$Pid, [int]$TimeoutSec, [string]$LogPath)
+    if ($Pid -le 0) { return }
+    Write-Log "waiting for process $Pid to exit" 'INFO' $LogPath
+    try {
+        Wait-Process -Id $Pid -Timeout $TimeoutSec -ErrorAction SilentlyContinue
+    } catch {}
+    Start-Sleep -Seconds 1.5
+}
+
+function Copy-Payload {
+    param([string]$Src, [string]$Dst, [string]$LogPath)
+    # Prefer robocopy for robustness if available
+    $robocopy = (Get-Command robocopy -ErrorAction SilentlyContinue)
+    if ($robocopy) {
+        # /E recurse, /XO skip older, /R:2 retry 2 times, /W:1 wait 1s, /NP no progress
+        $rcArgs = @($Src, $Dst, '/E','/XO','/R:2','/W:1','/NFL','/NDL','/NP','/NJH','/NJS')
+        $p = Start-Process -FilePath $robocopy.Source -ArgumentList $rcArgs -Wait -NoNewWindow -PassThru
+        if ($p.ExitCode -lt 8) { return }
+        Write-Log "robocopy exit code $($p.ExitCode), falling back to Copy-Item" 'WARNING' $LogPath
+    }
+    $srcPrefix = (Resolve-Path $Src).Path.TrimEnd('\\','/')
+    Get-ChildItem -Path $Src -Recurse -File | ForEach-Object {
+        $full = $_.FullName
+        if ($full.StartsWith($srcPrefix)) { $rel = $full.Substring($srcPrefix.Length).TrimStart('\\','/') } else { $rel = $_.Name }
+        $destDir = Join-Path $Dst ([System.IO.Path]::GetDirectoryName($rel))
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        $destFile = Join-Path $Dst $rel
+        $tmpFile = "$destFile.updatetmp"
+        if (Test-Path $tmpFile) { Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue }
+        Copy-Item -Path $_.FullName -Destination $tmpFile -Force
+        try { Move-Item -Path $tmpFile -Destination $destFile -Force } catch {
+            # If Move fails, try Copy as fallback
+            Copy-Item -Path $_.FullName -Destination $destFile -Force
+            if (Test-Path $tmpFile) { Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue }
+        }
+        Write-Log "updated $destFile" 'DEBUG' $LogPath
+    }
+}
+
+try {
+    $m = Get-Content -Path $Manifest -Encoding UTF8 | ConvertFrom-Json
+} catch {
+    Write-Log "failed to read manifest: $($_.Exception.Message)" 'ERROR' ''
+    exit 1
+}
+
+$StagingRoot = $m.staging_root
+$PayloadRoot = $m.payload_root
+$TargetRoot  = $m.target_root
+$WaitPid     = [int]$m.wait_pid
+$Restart     = [bool]$m.restart
+$RestartCmd  = @($m.restart_cmd)
+$LogPath     = if ($m.log_path) { [string]$m.log_path } else { Join-Path $env:TEMP 'update.log' }
+
+Write-Log 'update helper started' 'INFO' $LogPath
+Wait-ForExit -Pid $WaitPid -TimeoutSec $Timeout -LogPath $LogPath
+
+try {
+    Copy-Payload -Src $PayloadRoot -Dst $TargetRoot -LogPath $LogPath
+    Write-Log 'UPDATE_SUCCESS files applied' 'SUCCESS' $LogPath
+} catch {
+    Write-Log "update failed: $($_.Exception.Message)" 'ERROR' $LogPath
+    exit 1
+} finally {
+    if ($m.cleanup -ne $false) {
+        try { Remove-Item -Path $StagingRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+    }
+}
+
+if ($Restart -and $RestartCmd -and $RestartCmd.Length -gt 0) {
+    try {
+        $exe = [string]$RestartCmd[0]
+        $args = @()
+        if ($RestartCmd.Length -gt 1) { $args = $RestartCmd[1..($RestartCmd.Length-1)] }
+        Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory $TargetRoot -WindowStyle Hidden
+        Write-Log 'restart command launched' 'INFO' $LogPath
+    } catch {
+        Write-Log "failed to restart application: $($_.Exception.Message)" 'WARNING' $LogPath
+    }
+}
+
+Write-Log 'Update helper finished' 'INFO' $LogPath
+"""

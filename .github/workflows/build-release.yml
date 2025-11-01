@@ -151,7 +151,78 @@ jobs:
           fi
         shell: bash
 
-      - name: Upload artifact
+      - name: Install NSIS (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install nsis -y
+        shell: powershell
+
+      - name: Build Windows installer (NSIS)
+        if: runner.os == 'Windows'
+        run: |
+          $version = "${{ needs.version.outputs.version }}"
+          $exeName = "${{ matrix.executable }}${{ matrix.ext }}"
+          $setupName = "${{ matrix.executable }}-Setup-$version.exe"
+
+          $nsi = @"
+!define APPNAME "Tomato Novel Downloader"
+!define VERSION "$version"
+OutFile "dist\$setupName"
+InstallDir "$PROGRAMFILES64\TomatoNovelDownloader"
+RequestExecutionLevel admin
+
+Page directory
+Page instfiles
+UninstPage uninstConfirm
+UninstPage instfiles
+
+Section "Install"
+  SetOutPath "$INSTDIR"
+  File "/oname:TomatoNovelDownloader.exe" "dist\$exeName"
+  CreateDirectory "$SMPROGRAMS\TomatoNovelDownloader"
+  CreateShortcut "$SMPROGRAMS\TomatoNovelDownloader\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"
+  CreateShortcut "$DESKTOP\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "DisplayName" "Tomato Novel Downloader"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "UninstallString" "$INSTDIR\Uninstall.exe"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "DisplayIcon" "$INSTDIR\TomatoNovelDownloader.exe"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "DisplayVersion" "${VERSION}"
+SectionEnd
+
+Section "Uninstall"
+  Delete "$SMPROGRAMS\TomatoNovelDownloader\TomatoNovelDownloader.lnk"
+  RMDir "$SMPROGRAMS\TomatoNovelDownloader"
+  Delete "$INSTDIR\TomatoNovelDownloader.exe"
+  Delete "$INSTDIR\Uninstall.exe"
+  RMDir "$INSTDIR"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader"
+SectionEnd
+"@
+
+          Set-Content -Path installer.nsi -Value $nsi -Encoding ASCII
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" installer.nsi
+          if (-not $?) { throw "NSIS build failed" }
+          Write-Host "Built installer: dist/$setupName"
+        shell: powershell
+
+      - name: Upload artifact (Windows installer)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.executable }}-Setup-${{ needs.version.outputs.version }}.exe
+          if-no-files-found: error
+
+      - name: Upload artifact (Windows raw exe for auto-update)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.executable }}${{ matrix.ext }}
+          if-no-files-found: error
+
+      - name: Upload artifact (non-Windows binary)
+        if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}

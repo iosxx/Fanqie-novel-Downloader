@@ -155,6 +155,8 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           choco install nsis -y
+          # Refresh environment variables
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
         shell: powershell
 
       - name: Build Windows installer (NSIS)
@@ -208,12 +210,23 @@ jobs:
           $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
           if (-not $makensis) {
             $candidates = @(
+              "$env:ProgramData\chocolatey\lib\nsis\tools\makensis.exe",
               "$env:ProgramFiles(x86)\NSIS\makensis.exe",
-              "$env:ProgramFiles\NSIS\makensis.exe"
+              "$env:ProgramFiles\NSIS\makensis.exe",
+              "C:\Program Files (x86)\NSIS\makensis.exe",
+              "C:\Program Files\NSIS\makensis.exe"
             )
             $makensis = ($candidates | Where-Object { Test-Path $_ } | Select-Object -First 1)
           }
-          if (-not $makensis) { throw "makensis not found after installation" }
+          if (-not $makensis) { 
+            Write-Host "Attempted paths:"
+            @(
+              "$env:ProgramData\chocolatey\lib\nsis\tools\makensis.exe",
+              "$env:ProgramFiles(x86)\NSIS\makensis.exe",
+              "$env:ProgramFiles\NSIS\makensis.exe"
+            ) | ForEach-Object { Write-Host "  - $_" }
+            throw "makensis not found after installation" 
+          }
           & $makensis installer.nsi
           if ($LASTEXITCODE -ne 0) { throw "NSIS build failed with code $LASTEXITCODE" }
           Write-Host "Built installer: dist/$setupName"

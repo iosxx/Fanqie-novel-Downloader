@@ -166,10 +166,26 @@ jobs:
           $exeName = "${{ matrix.executable }}${{ matrix.ext }}"
           $setupName = "${{ matrix.executable }}-Setup-$version.exe"
           
-          # Convert paths to forward slashes for NSIS
-          $distPath = (Get-Location).Path.Replace('\', '/') + '/dist'
-          $exePath = "$distPath/$exeName"
-          $outPath = "$distPath/$setupName"
+          # Debug: Show dist directory contents
+          Write-Host "=== Debug Info ==="
+          Write-Host "Current directory: $(Get-Location)"
+          Write-Host "Expected exe name: $exeName"
+          Write-Host "Dist directory contents:"
+          Get-ChildItem dist -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  - $($_.Name)" }
+          
+          # Verify the file exists
+          if (-not (Test-Path "dist\$exeName")) { 
+            throw "Built exe not found: dist\$exeName" 
+          }
+          
+          # Convert paths to forward slashes for NSIS compatibility
+          $currentDir = (Get-Location).Path.Replace('\', '/')
+          $exePath = "$currentDir/dist/$exeName"
+          $outPath = "$currentDir/dist/$setupName"
+          
+          Write-Host "Exe path for NSIS: $exePath"
+          Write-Host "Out path for NSIS: $outPath"
+          Write-Host "==================`n"
 
           # Use single-quoted here-string so NSIS $vars are not expanded by PowerShell
           $nsi = @'
@@ -211,7 +227,6 @@ jobs:
           $nsi = $nsi.Replace('__VERSION__', $version).Replace('__OUTFILE__', $outPath).Replace('__EXEFILE__', $exePath)
 
           Set-Content -Path installer.nsi -Value $nsi -Encoding ASCII
-          if (-not (Test-Path "dist\$exeName")) { throw "Built exe not found: dist\$exeName" }
           $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
           if (-not $makensis) {
             $candidates = @(

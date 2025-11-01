@@ -200,8 +200,18 @@ jobs:
           "@
 
           Set-Content -Path installer.nsi -Value $nsi -Encoding ASCII
-          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" installer.nsi
-          if (-not $?) { throw "NSIS build failed" }
+          if (-not (Test-Path "dist\$exeName")) { throw "Built exe not found: dist\$exeName" }
+          $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
+          if (-not $makensis) {
+            $candidates = @(
+              "$env:ProgramFiles(x86)\NSIS\makensis.exe",
+              "$env:ProgramFiles\NSIS\makensis.exe"
+            )
+            $makensis = ($candidates | Where-Object { Test-Path $_ } | Select-Object -First 1)
+          }
+          if (-not $makensis) { throw "makensis not found after installation" }
+          & $makensis installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "NSIS build failed with code $LASTEXITCODE" }
           Write-Host "Built installer: dist/$setupName"
         shell: powershell
 

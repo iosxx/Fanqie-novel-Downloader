@@ -168,7 +168,7 @@ jobs:
           $nsi = @'
           !define APPNAME "Tomato Novel Downloader"
           !define VERSION "__VERSION__"
-          OutFile "dist\__SETUP_NAME__"
+          OutFile "dist/__SETUP_NAME__"
           InstallDir "$PROGRAMFILES64\TomatoNovelDownloader"
           RequestExecutionLevel admin
 
@@ -179,7 +179,7 @@ jobs:
 
           Section "Install"
             SetOutPath "$INSTDIR"
-            File "/oname=TomatoNovelDownloader.exe" "dist\__EXE_NAME__"
+            File "/oname=TomatoNovelDownloader.exe" "dist/__EXE_NAME__"
             CreateDirectory "$SMPROGRAMS\TomatoNovelDownloader"
             CreateShortcut "$SMPROGRAMS\TomatoNovelDownloader\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"
             CreateShortcut "$DESKTOP\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"

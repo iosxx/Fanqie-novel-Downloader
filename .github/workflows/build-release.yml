@@ -165,39 +165,39 @@ jobs:
           $setupName = "${{ matrix.executable }}-Setup-$version.exe"
 
           $nsi = @"
-!define APPNAME "Tomato Novel Downloader"
-!define VERSION "$version"
-OutFile "dist\$setupName"
-InstallDir "$PROGRAMFILES64\TomatoNovelDownloader"
-RequestExecutionLevel admin
+          !define APPNAME "Tomato Novel Downloader"
+          !define VERSION "$version"
+          OutFile "dist\$setupName"
+          InstallDir "$PROGRAMFILES64\TomatoNovelDownloader"
+          RequestExecutionLevel admin
 
-Page directory
-Page instfiles
-UninstPage uninstConfirm
-UninstPage instfiles
+          Page directory
+          Page instfiles
+          UninstPage uninstConfirm
+          UninstPage instfiles
 
-Section "Install"
-  SetOutPath "$INSTDIR"
-  File "/oname:TomatoNovelDownloader.exe" "dist\$exeName"
-  CreateDirectory "$SMPROGRAMS\TomatoNovelDownloader"
-  CreateShortcut "$SMPROGRAMS\TomatoNovelDownloader\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"
-  CreateShortcut "$DESKTOP\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"
-  WriteUninstaller "$INSTDIR\Uninstall.exe"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "DisplayName" "Tomato Novel Downloader"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "UninstallString" "$INSTDIR\Uninstall.exe"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "DisplayIcon" "$INSTDIR\TomatoNovelDownloader.exe"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "DisplayVersion" "${VERSION}"
-SectionEnd
+          Section "Install"
+            SetOutPath "$INSTDIR"
+            File "/oname:TomatoNovelDownloader.exe" "dist\$exeName"
+            CreateDirectory "$SMPROGRAMS\TomatoNovelDownloader"
+            CreateShortcut "$SMPROGRAMS\TomatoNovelDownloader\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"
+            CreateShortcut "$DESKTOP\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"
+            WriteUninstaller "$INSTDIR\Uninstall.exe"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "DisplayName" "Tomato Novel Downloader"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "UninstallString" "$INSTDIR\Uninstall.exe"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "DisplayIcon" "$INSTDIR\TomatoNovelDownloader.exe"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader" "DisplayVersion" "${VERSION}"
+          SectionEnd
 
-Section "Uninstall"
-  Delete "$SMPROGRAMS\TomatoNovelDownloader\TomatoNovelDownloader.lnk"
-  RMDir "$SMPROGRAMS\TomatoNovelDownloader"
-  Delete "$INSTDIR\TomatoNovelDownloader.exe"
-  Delete "$INSTDIR\Uninstall.exe"
-  RMDir "$INSTDIR"
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader"
-SectionEnd
-"@
+          Section "Uninstall"
+            Delete "$SMPROGRAMS\TomatoNovelDownloader\TomatoNovelDownloader.lnk"
+            RMDir "$SMPROGRAMS\TomatoNovelDownloader"
+            Delete "$INSTDIR\TomatoNovelDownloader.exe"
+            Delete "$INSTDIR\Uninstall.exe"
+            RMDir "$INSTDIR"
+            DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader"
+          SectionEnd
+          "@
 
           Set-Content -Path installer.nsi -Value $nsi -Encoding ASCII
           & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" installer.nsi

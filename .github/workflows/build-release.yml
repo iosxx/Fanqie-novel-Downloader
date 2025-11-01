@@ -164,10 +164,11 @@ jobs:
           $exeName = "${{ matrix.executable }}${{ matrix.ext }}"
           $setupName = "${{ matrix.executable }}-Setup-$version.exe"
 
-          $nsi = @"
+          # Use single-quoted here-string so NSIS $vars are not expanded by PowerShell
+          $nsi = @'
           !define APPNAME "Tomato Novel Downloader"
-          !define VERSION "$version"
-          OutFile "dist\$setupName"
+          !define VERSION "__VERSION__"
+          OutFile "dist\__SETUP_NAME__"
           InstallDir "$PROGRAMFILES64\TomatoNovelDownloader"
           RequestExecutionLevel admin
 
@@ -178,7 +179,7 @@ jobs:
 
           Section "Install"
             SetOutPath "$INSTDIR"
-            File "/oname:TomatoNovelDownloader.exe" "dist\$exeName"
+            File "/oname:TomatoNovelDownloader.exe" "dist\__EXE_NAME__"
             CreateDirectory "$SMPROGRAMS\TomatoNovelDownloader"
             CreateShortcut "$SMPROGRAMS\TomatoNovelDownloader\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"
             CreateShortcut "$DESKTOP\TomatoNovelDownloader.lnk" "$INSTDIR\TomatoNovelDownloader.exe"
@@ -197,7 +198,10 @@ jobs:
             RMDir "$INSTDIR"
             DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\TomatoNovelDownloader"
           SectionEnd
-          "@
+          '@
+
+          # Replace placeholders with actual names
+          $nsi = $nsi.Replace('__VERSION__', $version).Replace('__SETUP_NAME__', $setupName).Replace('__EXE_NAME__', $exeName)
 
           Set-Content -Path installer.nsi -Value $nsi -Encoding ASCII
           if (-not (Test-Path "dist\$exeName")) { throw "Built exe not found: dist\$exeName" }

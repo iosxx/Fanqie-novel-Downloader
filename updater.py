@@ -400,14 +400,14 @@ class AutoUpdater:
             s = 0
             if system.startswith('win'):
                 if name.endswith('.exe'):
-                    s += 6
+                    s += 4
                 if name.endswith('.zip'):
-                    s += 5
-                if 'windows' in name or 'win' in name:
                     s += 3
-                # Prefer plain binaries over installers for auto-update
+                if 'windows' in name or 'win' in name:
+                    s += 2
+                # Prefer installer packages for Windows release updates
                 if 'setup' in name or 'installer' in name:
-                    s -= 4
+                    s += 6
             elif system == 'darwin':
                 if any(token in name for token in ('mac', 'darwin', 'osx')):
                     s += 4
@@ -557,7 +557,7 @@ class AutoUpdater:
             'payload_root': payload_root
         }
 
-    def _write_manifest(self, staging_root: Path, payload_root: Path, restart: bool) -> Path:
+    def _write_manifest(self, staging_root: Path, payload_root: Path, restart: bool, installer_path: Optional[Path] = None) -> Path:
         manifest = {
             'staging_root': str(staging_root),
             'payload_root': str(payload_root),
@@ -567,7 +567,8 @@ class AutoUpdater:
             'restart_cmd': self._restart_command() if restart else [],
             'log_path': str(UPDATE_LOG_PATH),
             'cleanup': True,
-            'created_at': time.time()
+            'created_at': time.time(),
+            'installer_path': (str(installer_path) if installer_path else None)
         }
         manifest_path = staging_root / 'update_manifest.json'
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -614,6 +615,8 @@ class AutoUpdater:
         return proc.pid
 
     def install_update(self, update_file: str, restart: bool = True) -> bool:
+        name_lower = os.path.basename(update_file).lower()
+        is_installer = (sys.platform.startswith('win') and name_lower.endswith('.exe') and (('setup' in name_lower) or ('installer' in name_lower)))
         update_path = Path(update_file)
         if not update_path.exists():
             self._notify('install_error', f'update file not found: {update_file}')
@@ -623,7 +626,7 @@ class AutoUpdater:
             staging_info = self._prepare_staging(update_path)
             staging_root = staging_info['staging_root']
             payload_root = staging_info['payload_root']
-            manifest_path = self._write_manifest(staging_root, payload_root, restart)
+            manifest_path = self._write_manifest(staging_root, payload_root, restart, (staging_root / update_path.name) if is_installer else None)
             helper_path = self._write_helper_script()
             self._notify('install_ready', {'manifest': str(manifest_path)})
             helper_pid = self._spawn_helper(helper_path, manifest_path)
@@ -806,13 +809,28 @@ def main():
     staging_root = Path(manifest['staging_root'])
     payload_root = Path(manifest['payload_root'])
     target_root = Path(manifest['target_root'])
+    installer_path = Path(manifest.get('installer_path') or '') if manifest.get('installer_path') else None
 
     _log('update helper started', 'INFO', log_path)
     _wait_for_exit(int(manifest.get('wait_pid') or 0), args.timeout, log_path)
 
     try:
-        _copy_payload(payload_root, target_root, log_path)
-        _log('UPDATE_SUCCESS files applied', 'SUCCESS', log_path)
+        if installer_path and installer_path.exists():
+            if platform.system().lower().startswith('win'):
+                # Elevate and run NSIS installer silently with target dir
+                safe_target = str(target_root)
+                ps_cmd = (
+                    f"Start-Process -FilePath \"{installer_path}\" "
+                    f"-ArgumentList '/S','/D={safe_target}' -Verb RunAs -Wait"
+                )
+                subprocess.check_call(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps_cmd])
+                _log('INSTALLER_SUCCESS executed NSIS installer', 'SUCCESS', log_path)
+            else:
+                subprocess.check_call([str(installer_path), '/S'])
+                _log('INSTALLER_SUCCESS executed installer', 'SUCCESS', log_path)
+        else:
+            _copy_payload(payload_root, target_root, log_path)
+            _log('UPDATE_SUCCESS files applied', 'SUCCESS', log_path)
     except Exception as exc:
         _log(f'update failed: {exc}', 'ERROR', log_path)
         sys.exit(1)
@@ -918,8 +936,14 @@ Write-Log 'update helper started' 'INFO' $LogPath
 Wait-ForExit -Pid $WaitPid -TimeoutSec $Timeout -LogPath $LogPath
 
 try {
-    Copy-Payload -Src $PayloadRoot -Dst $TargetRoot -LogPath $LogPath
-    Write-Log 'UPDATE_SUCCESS files applied' 'SUCCESS' $LogPath
+    if ($m.installer_path -and (Test-Path -Path $m.installer_path)) {
+        $args = @('/S', "/D=$TargetRoot")
+        Start-Process -FilePath $m.installer_path -ArgumentList $args -Verb RunAs -Wait
+        Write-Log 'INSTALLER_SUCCESS executed NSIS installer' 'SUCCESS' $LogPath
+    } else {
+        Copy-Payload -Src $PayloadRoot -Dst $TargetRoot -LogPath $LogPath
+        Write-Log 'UPDATE_SUCCESS files applied' 'SUCCESS' $LogPath
+    }
 } catch {
     Write-Log "update failed: $($_.Exception.Message)" 'ERROR' $LogPath
     exit 1
@@ -943,3 +967,5 @@ if ($Restart -and $RestartCmd -and $RestartCmd.Length -gt 0) {
 
 Write-Log 'Update helper finished' 'INFO' $LogPath
 """
+
+

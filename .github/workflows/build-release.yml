@@ -247,7 +247,7 @@ SectionEnd
       - name: Prepare release files
         run: |
           mkdir -p release
-          find artifacts -type f -exec cp {} release/ \;
+          find artifacts -type f \( -name '*-Setup-*.exe' -o ! -name '*.exe' \) -exec cp {} release/ \;
           ls -lh release/
         shell: bash
 

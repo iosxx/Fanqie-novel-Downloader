@@ -94,8 +94,8 @@ class ModernNovelDownloaderGUI:
             self.official_build = False
 
         # 清理可能残留的更新备份文件和旧日志
-        self._cleanup_update_backups()
-        self._cleanup_old_update_logs()
+        # self._cleanup_update_backups()  # 废弃的方法
+        # self._cleanup_old_update_logs()  # 废弃的方法
         
         # 配置文件路径
         self.config_file = "config.json"
@@ -118,7 +118,7 @@ class ModernNovelDownloaderGUI:
         self.check_existing_verification()
 
         # 启用更新系统
-        self._check_last_update_status()
+        # self._check_last_update_status()  # 废弃的方法
         # 启动时自动检查更新（仅官方打包版），受配置项 auto_check_update 控制
         try:
             auto_check = bool(self.config.get('auto_check_update', True))

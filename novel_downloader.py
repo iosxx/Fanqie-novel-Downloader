@@ -1785,7 +1785,7 @@ def download_chapters_in_batches(book_id, chapters_to_download, chapter_results,
     if total_tasks == 0:
         return
 
-    batch_size = min(10, CONFIG.get("async_batch_size", 10))
+    batch_size = min(30, CONFIG.get("async_batch_size", 30))
 
     with print_lock:
         print(f"开始批量下载，总章节数: {total_tasks}, 每批最多: {batch_size}")

@@ -17,24 +17,6 @@ import platform
 import tempfile
 import shutil
 
-# 内置外部更新入口：当以 '--run-updater' 启动时，直接运行 external_updater 而非 GUI
-if '--run-updater' in sys.argv:
-    try:
-        import external_updater as _ext_updater
-        # 重写 sys.argv 以兼容 external_updater.main() 的入参格式
-        idx = sys.argv.index('--run-updater')
-        new_argv = [sys.argv[0]]
-        if len(sys.argv) > idx + 1:
-            new_argv.append(sys.argv[idx + 1])  # update_info_json
-        if len(sys.argv) > idx + 2:
-            new_argv.append(sys.argv[idx + 2])  # target_exe
-        sys.argv = new_argv
-        _ext_updater.main()
-    except Exception as _e:
-        print(f"外部更新执行失败: {_e}")
-    finally:
-        sys.exit(0)
-
 # 添加HEIC支持
 try:
     from pillow_heif import register_heif_opener
@@ -79,19 +61,8 @@ class ModernNovelDownloaderGUI:
         self.download_semaphore = threading.Semaphore(self.max_concurrent_downloads)
         self.cover_download_queue = []  # 封面下载队列
         
-        # 初始化版本信息和自动更新
+        # 初始化版本信息
         self.current_version = __version__
-        
-        # 尝试导入 updater 模块（可选）
-        try:
-            from updater import AutoUpdater, is_official_release_build
-            self.updater = AutoUpdater(__github_repo__, self.current_version)
-            self.updater.register_callback(self.on_update_event)
-            self.official_build = is_official_release_build()
-        except ImportError as e:
-            print(f"updater 模块不可用: {e}")
-            self.updater = None
-            self.official_build = False
 
         # 清理可能残留的更新备份文件和旧日志
         # self._cleanup_update_backups()  # 废弃的方法
@@ -117,15 +88,6 @@ class ModernNovelDownloaderGUI:
         # 检查已有的验证状态
         self.check_existing_verification()
 
-        # 启用更新系统
-        # self._check_last_update_status()  # 废弃的方法
-        # 启动时自动检查更新（仅官方打包版），受配置项 auto_check_update 控制
-        try:
-            auto_check = bool(self.config.get('auto_check_update', True))
-        except Exception:
-            auto_check = True
-        if self.official_build and auto_check:
-            self.root.after(800, self.check_update_force)
 
         # 禁用启动时的API测试，避免启动卡顿
         # self.root.after(1000, self._test_api_connection_at_startup)
@@ -330,17 +292,11 @@ class ModernNovelDownloaderGUI:
                                               "🔄 检查更新",
                                               self.manual_check_update,
                                               self.colors['primary'])
-        check_update_btn.pack(side=tk.RIGHT, padx=5)
+        check_update_btn.pack(side=tk.LEFT, padx=(0, 10))
         
         # 版本信息标签
-        try:
-            from updater import get_current_version
-            version_text = f"版本: {get_current_version()}"
-        except ImportError:
-            version_text = f"版本: {self.current_version}"
-        
-        version_label = tk.Label(toolbar_frame,
-                                text=version_text,
+        version_text = f"版本: {self.current_version}"
+        version_label = tk.Label(toolbar_right, text=version_text,
                                 font=self.fonts['small'],
                                 bg=self.colors['surface'],
                                 fg=self.colors['text_secondary'])
@@ -2926,28 +2882,6 @@ API数量: {api_count}个
         except Exception as e:
             messagebox.showerror("清除失败", f"清除失败: {str(e)}")
     
-    def _format_update_message(self, body):
-        """格式化更新消息，支持Markdown"""
-        if not body:
-            return ""
-        
-        try:
-            import markdown
-            # 将Markdown转换为纯文本，移除HTML标签
-            html = markdown.markdown(body)
-            # 简单的HTML标签移除
-            import re
-            text = re.sub(r'<[^>]+>', '', html)
-            # 清理多余的空行
-            text = re.sub(r'\n\s*\n', '\n\n', text).strip()
-            return text
-        except ImportError:
-            # 如果markdown库不可用，返回原始文本
-            return body
-        except Exception:
-            # 如果转换失败，返回原始文本
-            return body
-
     def update_verification_status(self, status_text, color=None):
         """更新验证状态显示"""
         if hasattr(self, 'verification_status_label'):
@@ -3076,181 +3010,74 @@ API数量: {saved_api_count}个
         else:
             self.update_verification_status("API连接失败 (请检查网络)", self.colors['error'])
 
-    def check_update_silent(self):
-        """在后台静默检查更新"""
-        if not getattr(self, 'official_build', False):
-            return
-        
-        try:
-            from updater import check_and_notify_update
-        except ImportError:
-            print("updater 模块不可用，跳过静默更新检查")
-            return
-        
-        def notify(update_info):
-            if not update_info:
-                return
-            self.root.after(0, lambda: self._prompt_update(update_info))
-        try:
-            check_and_notify_update(self.updater, notify)
-        except Exception as e:
-            print(f"静默检查更新失败: {e}")
-    
-    def check_update_force(self):
-        """启动时的强制更新检查"""
-        if not getattr(self, 'official_build', False):
-            return
-        
-        def worker():
-            try:
-                info = self.updater.checker.get_latest_update(force=True)
-                if info:
-                    self.root.after(0, lambda: self._prompt_update(info))
-                else:
-                    print("当前已是最新版。")
-            except Exception as e:
-                print(f"强制更新检查失败: {e}")
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _prompt_update(self, update_info):
         """弹窗提示用户是否更新，并跳转到GitHub发布页面"""
         try:
             ver = update_info.get('version', '?') if isinstance(update_info, dict) else '?'
-            body = (update_info.get('body', '') if isinstance(update_info, dict) else '') or ''
-            
-            # 尝试将Markdown转换为HTML以便更好地显示
-            formatted_body = self._format_update_message(body)
-            
-            message = f"发现新版 v{ver}，是否现在更新？"
-            if formatted_body:
-                message += f"\n\n更新内容:\n{formatted_body[:1000]}"
-            
-            message += "\n\n点击'是'将打开GitHub发布页面进行手动下载。"
+            message = f"发现新版本 v{ver}，是否立即打开GitHub发布页面下载？"
             
             if messagebox.askyesno("发现新版本", message):
-                # 跳转到GitHub发布页面
                 releases_url = f"https://github.com/{__github_repo__}/releases/latest"
                 try:
-                    import webbrowser
                     webbrowser.open(releases_url)
-                    self.log(f"已在浏览器中打开GitHub发布页面: {releases_url}")
+                    self.log(f"已在浏览器中打开GitHub发布页面")
                 except Exception as e:
                     self.log(f"打开浏览器失败: {e}")
-                    messagebox.showinfo("发布页面链接", f"请手动访问以下链接下载新版本:\n\n{releases_url}")
+                    messagebox.showinfo("发布页面链接", f"请手动访问:\n{releases_url}")
         except Exception as e:
             self.log(f"提示更新失败: {e}")
 
     def check_update_now(self):
         """立即检查更新（手动触发）"""
+        releases_url = f"https://github.com/{__github_repo__}/releases/latest"
+        
+        # 先尝试检查是否有新版本
+        def check_version():
+            try:
+                import requests
+                api_url = f"https://api.github.com/repos/{__github_repo__}/releases/latest"
+                response = requests.get(api_url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    latest_version = data.get('tag_name', '').lstrip('v')
+                    current_version = self.current_version.lstrip('v')
+                    
+                    if latest_version and latest_version != current_version:
+                        # 有新版本
+                        self.root.after(0, lambda: self._show_update_available(latest_version, releases_url))
+                    else:
+                        # 已是最新版本
+                        self.root.after(0, lambda: messagebox.showinfo("检查更新", "当前已是最新版本。"))
+                else:
+                    # API请求失败，直接打开页面
+                    self.root.after(0, lambda: self._open_releases_page(releases_url))
+            except Exception:
+                # 检查失败，直接打开页面
+                self.root.after(0, lambda: self._open_releases_page(releases_url))
+        
+        # 在后台线程检查版本
+        threading.Thread(target=check_version, daemon=True).start()
+    
+    def _show_update_available(self, new_version, releases_url):
+        """显示有新版本可用"""
+        if messagebox.askyesno("发现新版本", f"发现新版本 v{new_version}，是否立即打开GitHub发布页面下载？"):
+            try:
+                webbrowser.open(releases_url)
+            except Exception as e:
+                messagebox.showerror("打开失败", f"无法打开浏览器：{e}\n\n请手动访问：{releases_url}")
+    
+    def _open_releases_page(self, releases_url):
+        """打开GitHub发布页面"""
         try:
-            if not hasattr(self, 'updater') or self.updater is None:
-                messagebox.showerror("更新系统未初始化", "更新系统未正确初始化，无法检查更新。")
-                return
-            info = self.updater.checker.get_latest_update(force=True)
-            if info:
-                self._prompt_update(info)
-            else:
-                messagebox.showinfo("检查更新", "当前已是最新版本。")
+            webbrowser.open(releases_url)
+            messagebox.showinfo("检查更新", "已打开GitHub发布页面，请检查是否有新版本。")
         except Exception as e:
-            messagebox.showerror("检查更新失败", f"{e}")
+            messagebox.showerror("打开失败", f"无法打开浏览器：{e}\n\n请手动访问：{releases_url}")
 
     def manual_check_update(self):
-        """手动检查更新（新方法，统一入口）"""
-        try:
-            # 检查 updater 模块是否可用
-            try:
-                from updater import check_and_notify_update, is_official_release_build
-            except ImportError as e:
-                messagebox.showerror("功能不可用",
-                    "更新功能需要安装依赖库：\n\n"
-                    "pip install requests packaging markdown\n\n"
-                    f"详细错误：{str(e)}")
-                return
-            
-            # 对于所有构建类型，都直接跳转到发布页
-            releases_url = f"https://github.com/{__github_repo__}/releases/latest"
-            try:
-                import webbrowser
-                webbrowser.open(releases_url)
-                messagebox.showinfo("检查更新",
-                                  "已在浏览器中打开GitHub发布页面。\n\n"
-                                  "请手动下载最新版本进行更新。")
-            except Exception as e:
-                messagebox.showerror("打开失败", f"无法打开浏览器：{str(e)}\n\n请手动访问：{releases_url}")
-                return
-            
-            self.log(f"已打开GitHub发布页面: {releases_url}")
-            
-            # 显示检查中提示
-            self.log("正在检查更新...")
-            
-            # 调用现有的更新检测方法（内部会弹窗询问，用户选择后才会继续）
-            self.check_update_now()
-
-        except Exception as e:
-            # 只在调试模式下显示错误
-            if hasattr(sys, '_MEIPASS') and '-debug' in sys.argv[0].lower():
-                print(f"[DEBUG] 检查更新状态失败: {e}")
-
-    def on_update_event(self, event: str, data: any):
-        """处理所有更新相关的GUI事件"""
-        if event == 'check_start':
-            self.log("正在检查更新...")
-        elif event == 'update_available':
-            self.log(f"发现新版本: {data['version']}")
-            ver = data.get('version', '?')
-            body = (data.get('body') or '').strip()
-            
-            # 尝试将Markdown转换为HTML以便更好地显示
-            formatted_body = self._format_update_message(body)
-            
-            message = f"发现新版 v{ver}，是否立即更新？"
-            if formatted_body:
-                message += f"\n\n更新内容:\n{formatted_body[:1000]}"
-            
-            message += "\n\n点击'是'将打开GitHub发布页面进行手动下载。"
-            
-            if messagebox.askyesno("发现新版本", message):
-                self.log("正在打开GitHub发布页面...")
-                # 跳转到GitHub发布页面
-                releases_url = f"https://github.com/{__github_repo__}/releases/latest"
-                try:
-                    import webbrowser
-                    webbrowser.open(releases_url)
-                    self.log(f"已在浏览器中打开GitHub发布页面: {releases_url}")
-                except Exception as e:
-                    self.log(f"打开浏览器失败: {e}")
-                    messagebox.showinfo("发布页面链接", f"请手动访问以下链接下载新版本:\n\n{releases_url}")
-        elif event == 'no_update':
-            self.log("当前已是最新版本。")
-            messagebox.showinfo("检查更新", "当前已是最新版本。")
-        elif event == 'download_start':
-            # 不再支持自动下载，改为提示用户
-            self.log("自动下载功能已禁用，请使用GitHub发布页面手动下载。")
-        elif event == 'download_progress':
-            # 不再支持自动下载
-            pass
-        elif event == 'download_complete':
-            # 不再支持自动下载
-            pass
-        elif event == 'install_ready':
-            # 不再支持自动安装
-            pass
-        elif event == 'helper_started':
-            self.log("更新助手已启动，程序即将退出。")
-            self.update_progress(100, "更新助手已启动，程序即将退出...")
-            self.root.after(800, self.root.quit)
-        elif event == 'install_scheduled':
-            self.log("已安排安装任务。")
-        elif event == 'install_error':
-            self.log(f"安装更新失败: {data}")
-            messagebox.showerror("更新失败", f"安装更新失败：{data}")
-            self.update_progress(0, "更新失败")
-        elif event == 'download_error':
-            self.log(f"下载更新失败: {data}")
-            messagebox.showerror("更新失败", f"下载更新文件失败：{data}")
-            self.update_progress(0, "更新失败")
+        """手动检查更新"""
+        self.check_update_now()
 
 
 

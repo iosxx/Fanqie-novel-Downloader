@@ -569,10 +569,10 @@ class ModernNovelDownloaderGUI:
                                              self.colors['secondary'])
         open_release_btn.pack(side=tk.RIGHT)
         
-        # 检查更新按钮（源码/非官方构建跳转到Releases页面）
+        # 检查更新按钮（所有构建都跳转到Releases页面）
         check_update_btn = self.create_button(version_frame,
                                              "🔄 检查更新",
-                                             (self.check_update_now if getattr(self, 'official_build', False) else (lambda: webbrowser.open(releases_url))),
+                                             lambda: webbrowser.open(releases_url),
                                              self.colors['primary'])
         check_update_btn.pack(side=tk.RIGHT, padx=(0, 10))
         
@@ -2515,12 +2515,8 @@ API数量: {api_count}个
                 verification_url = challenge_data.get("challenge_url")
             
             # 回退到固定URL，确保总能显示输入框
-            fixed_verification_url = "https://dlbkltos.s7123.xyz:5080/captcha"
+            fixed_verification_url = "http://101.34.64.209:9999/captcha"
             final_verification_url = verification_url or fixed_verification_url
-            # 端口补全
-            if "dlbkltos.s7123.xyz" in final_verification_url and ":5080" not in final_verification_url:
-                final_verification_url = final_verification_url.replace("dlbkltos.s7123.xyz", "dlbkltos.s7123.xyz:5080")
-            
             self._create_captcha_dialog(final_verification_url)
                 
         except Exception as e:
@@ -2582,18 +2578,16 @@ API数量: {api_count}个
         url_frame.pack(fill=tk.X, pady=(0, 15))
         
         # 强制使用固定的验证页面URL
-        fixed_verification_url = "https://dlbkltos.s7123.xyz:5080/captcha"
+        fixed_verification_url = "http://101.34.64.209:9999/captcha"
         open_btn = self.create_button(url_frame,
                                      "🌐 打开验证页面",
                                      lambda: webbrowser.open(fixed_verification_url),
                                      self.colors['primary'])
         open_btn.pack(side=tk.LEFT, padx=(0, 10))
         
-        # 使用更健壮的复制链接（优先服务端返回，其次固定URL，并补全端口）
+        # 使用更健壮的复制链接（优先服务端返回，其次固定URL）
         def _resolved_verification_url():
             url = verification_url or fixed_verification_url
-            if "dlbkltos.s7123.xyz" in url and ":5080" not in url:
-                url = url.replace("dlbkltos.s7123.xyz", "dlbkltos.s7123.xyz:5080")
             return url
         copy_btn = self.create_button(url_frame,
                                      "📋 复制验证链接",
@@ -2735,7 +2729,7 @@ API数量: {api_count}个
         url_frame.pack(fill=tk.X, pady=(0, 20))
         
         # 强制使用固定的验证页面URL
-        fixed_verification_url = "https://dlbkltos.s7123.xyz:5080/captcha"
+        fixed_verification_url = "http://101.34.64.209:9999/captcha"
         open_url_btn = self.create_button(url_frame, 
                                          "🌐 打开验证页面", 
                                          lambda: webbrowser.open(fixed_verification_url),
@@ -2745,8 +2739,6 @@ API数量: {api_count}个
         # 复制URL按钮
         def _resolved_verification_url_manual():
             url = verification_url or fixed_verification_url
-            if "dlbkltos.s7123.xyz" in url and ":5080" not in url:
-                url = url.replace("dlbkltos.s7123.xyz", "dlbkltos.s7123.xyz:5080")
             return url
         copy_url_btn = self.create_button(url_frame, 
                                          "📋 复制验证链接", 
@@ -2934,6 +2926,28 @@ API数量: {api_count}个
         except Exception as e:
             messagebox.showerror("清除失败", f"清除失败: {str(e)}")
     
+    def _format_update_message(self, body):
+        """格式化更新消息，支持Markdown"""
+        if not body:
+            return ""
+        
+        try:
+            import markdown
+            # 将Markdown转换为纯文本，移除HTML标签
+            html = markdown.markdown(body)
+            # 简单的HTML标签移除
+            import re
+            text = re.sub(r'<[^>]+>', '', html)
+            # 清理多余的空行
+            text = re.sub(r'\n\s*\n', '\n\n', text).strip()
+            return text
+        except ImportError:
+            # 如果markdown库不可用，返回原始文本
+            return body
+        except Exception:
+            # 如果转换失败，返回原始文本
+            return body
+
     def update_verification_status(self, status_text, color=None):
         """更新验证状态显示"""
         if hasattr(self, 'verification_status_label'):
@@ -3100,17 +3114,30 @@ API数量: {saved_api_count}个
         threading.Thread(target=worker, daemon=True).start()
 
     def _prompt_update(self, update_info):
-        """弹窗提示用户是否更新，并在确认后触发更新流程"""
+        """弹窗提示用户是否更新，并跳转到GitHub发布页面"""
         try:
             ver = update_info.get('version', '?') if isinstance(update_info, dict) else '?'
             body = (update_info.get('body', '') if isinstance(update_info, dict) else '') or ''
+            
+            # 尝试将Markdown转换为HTML以便更好地显示
+            formatted_body = self._format_update_message(body)
+            
             message = f"发现新版 v{ver}，是否现在更新？"
-            if body:
-                message += f"\n\n更新内容:\n{body[:800]}"
+            if formatted_body:
+                message += f"\n\n更新内容:\n{formatted_body[:1000]}"
+            
+            message += "\n\n点击'是'将打开GitHub发布页面进行手动下载。"
+            
             if messagebox.askyesno("发现新版本", message):
-                if hasattr(self, 'updater') and self.updater:
-                    self.save_config()
-                    threading.Thread(target=lambda: self.updater.apply_release(update_info, restart=True), daemon=True).start()
+                # 跳转到GitHub发布页面
+                releases_url = f"https://github.com/{__github_repo__}/releases/latest"
+                try:
+                    import webbrowser
+                    webbrowser.open(releases_url)
+                    self.log(f"已在浏览器中打开GitHub发布页面: {releases_url}")
+                except Exception as e:
+                    self.log(f"打开浏览器失败: {e}")
+                    messagebox.showinfo("发布页面链接", f"请手动访问以下链接下载新版本:\n\n{releases_url}")
         except Exception as e:
             self.log(f"提示更新失败: {e}")
 
@@ -3137,27 +3164,23 @@ API数量: {saved_api_count}个
             except ImportError as e:
                 messagebox.showerror("功能不可用",
                     "更新功能需要安装依赖库：\n\n"
-                    "pip install requests packaging\n\n"
+                    "pip install requests packaging markdown\n\n"
                     f"详细错误：{str(e)}")
                 return
             
-            # 对于非官方构建，直接跳转到发布页
-            if not getattr(self, 'official_build', False):
-                releases_url = f"https://github.com/{__github_repo__}/releases/latest"
-                try:
-                    webbrowser.open(releases_url)
-                    messagebox.showinfo("检查更新",
-                                      "已在浏览器中打开GitHub发布页面。\n\n"
-                                      "源码运行环境不支持自动更新，\n"
-                                      "请手动下载最新版本。")
-                except Exception as e:
-                    messagebox.showerror("打开失败", f"无法打开浏览器：{str(e)}")
+            # 对于所有构建类型，都直接跳转到发布页
+            releases_url = f"https://github.com/{__github_repo__}/releases/latest"
+            try:
+                import webbrowser
+                webbrowser.open(releases_url)
+                messagebox.showinfo("检查更新",
+                                  "已在浏览器中打开GitHub发布页面。\n\n"
+                                  "请手动下载最新版本进行更新。")
+            except Exception as e:
+                messagebox.showerror("打开失败", f"无法打开浏览器：{str(e)}\n\n请手动访问：{releases_url}")
                 return
             
-            # 确保 updater 已初始化
-            if not hasattr(self, 'updater') or self.updater is None:
-                messagebox.showerror("更新系统未初始化", "更新系统未正确初始化，无法检查更新。")
-                return
+            self.log(f"已打开GitHub发布页面: {releases_url}")
             
             # 显示检查中提示
             self.log("正在检查更新...")
@@ -3165,172 +3188,6 @@ API数量: {saved_api_count}个
             # 调用现有的更新检测方法（内部会弹窗询问，用户选择后才会继续）
             self.check_update_now()
 
-        except Exception as e:
-            self.log(f"启动外部更新程序失败: {e}")
-            messagebox.showerror("更新失败", f"启动更新程序失败: {e}")
-
-    def _create_external_update_script(self, update_info):
-        """创建并启动外部更新脚本"""
-        try:
-            import json
-            import subprocess
-
-            # 解析脚本来源目录（优先 PyInstaller 解包目录）
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            bundle_dir = getattr(sys, '_MEIPASS', script_dir)
-            external_src = os.path.join(bundle_dir, 'external_updater.py')
-            if not os.path.exists(external_src):
-                # 兼容性回退：尝试从可执行文件同目录查找
-                try:
-                    exe_dir = os.path.dirname(sys.executable)
-                except Exception:
-                    exe_dir = script_dir
-                external_src = os.path.join(exe_dir, 'external_updater.py')
-
-            # 最终校验
-            if not os.path.exists(external_src):
-                raise Exception(f"外部更新脚本不存在: {external_src}")
-
-            # 将更新器脚本复制到系统临时目录运行，避免路径/权限问题
-            temp_dir = tempfile.gettempdir()
-            external_script = os.path.join(temp_dir, 'external_updater.py')
-            try:
-                shutil.copy2(external_src, external_script)
-            except Exception as copy_err:
-                raise Exception(f"复制更新脚本失败: {copy_err}")
-
-            # 将更新信息序列化为 JSON 字符串
-            update_info_json = json.dumps(update_info)
-
-            # 创建批处理脚本或 shell 脚本启动外部更新程序
-            if platform.system() == 'Windows':
-                # Windows 批处理脚本
-                escaped_json = update_info_json.replace('"', '\\"')
-                batch_script = f"""@echo off
-setlocal
-cd /d "{temp_dir}"
-set "PYCMD="
-where python >nul 2>&1 && set "PYCMD=python"
-if not defined PYCMD where py >nul 2>&1 && set "PYCMD=py -3"
-if not defined PYCMD where python3 >nul 2>&1 && set "PYCMD=python3"
-if not defined PYCMD (
-  echo [Updater] 未找到可用的 Python 解释器
-  exit /b 1
-)
-%PYCMD% "{external_script}" "{escaped_json}"
-"""
-                batch_file = os.path.join(tempfile.gettempdir(), 'start_update.bat')
-                with open(batch_file, 'w', encoding='gbk') as f:
-                    f.write(batch_script)
-
-                # 启动批处理脚本（脱离控制台）
-                subprocess.Popen(['cmd', '/c', batch_file],
-                               creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
-            else:
-                # Unix shell 脚本
-                shell_script = f"""#!/bin/bash
-set -euo pipefail
-cd "{temp_dir}"
-python3 "{external_script}" '{update_info_json}'
-"""
-                shell_file = os.path.join(tempfile.gettempdir(), 'start_update.sh')
-                with open(shell_file, 'w') as f:
-                    f.write(shell_script)
-                os.chmod(shell_file, 0o755)
-
-                # 启动 shell 脚本
-                subprocess.Popen([shell_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-            self.log("外部更新脚本已启动")
-
-        except Exception as e:
-            self.log(f"创建外部更新脚本失败: {e}")
-            raise
-
-    def _cleanup_update_backups(self):
-        """清理可能残留的更新备份文件"""
-        try:
-            # 获取当前可执行文件路径
-            current_exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
-            backup_path = current_exe + '.backup'
-            
-            # 如果存在备份文件，删除它
-            if os.path.exists(backup_path):
-                try:
-                    os.remove(backup_path)
-                    print(f"已清理更新备份文件: {backup_path}")
-                except Exception as e:
-                    print(f"清理备份文件失败: {e}")
-            
-            # 清理临时目录中可能残留的备份
-            temp_backup = os.path.join(tempfile.gettempdir(), 'updater_backup.exe')
-            if os.path.exists(temp_backup):
-                try:
-                    os.remove(temp_backup)
-                    print(f"已清理临时备份文件: {temp_backup}")
-                except Exception as e:
-                    print(f"清理临时备份文件失败: {e}")
-                    
-        except Exception as e:
-            print(f"清理更新备份时出错: {e}")
-    
-    def _cleanup_old_update_logs(self):
-        """清理超过7天的更新日志"""
-        try:
-            import time
-            log_file = os.path.join(tempfile.gettempdir(), 'update.log')
-            
-            if os.path.exists(log_file):
-                # 检查文件修改时间
-                file_mtime = os.path.getmtime(log_file)
-                current_time = time.time()
-                days_old = (current_time - file_mtime) / (24 * 3600)
-                
-                # 如果日志超过7天，删除它
-                if days_old > 7:
-                    os.remove(log_file)
-                    print(f"已清理过期的更新日志（{days_old:.1f}天前）")
-        except Exception:
-            # 忽略清理失败，不影响程序运行
-            pass
-
-    def _check_last_update_status(self):
-        """检查上次更新的状态"""
-        try:
-            from updater import AutoUpdater
-        except ImportError:
-            print("updater 模块不可用，跳过更新状态检查")
-            return
-        
-        try:
-            status = AutoUpdater.check_update_status()
-
-            if status['log_exists']:
-                if status['update_success'] and status['last_update_time']:
-                    print(f"上次更新成功完成于: {status['last_update_time']}")
-                    # 清理成功的更新日志
-                    AutoUpdater.clear_update_log()
-                elif status['error_message']:
-                    print(f"上次更新失败: {status['error_message']}")
-                    # 可以在这里添加用户友好的提示
-                    try:
-                        # 在GUI完全加载后显示更新失败提示
-                        self.root.after(2000, lambda: messagebox.showwarning(
-                            "更新状态",
-                            f"检测到上次更新可能失败: {status['error_message']}\n"
-                            "建议重新运行更新或检查程序完整性。"
-                        ))
-                    except Exception:
-                        pass
-                    # 清理失败的更新日志，避免下次重复提示
-                    AutoUpdater.clear_update_log()
-                else:
-                    # 这通常是更新过程被中断或者是旧的日志文件
-                    # 不显示误导性消息，只在调试模式下输出
-                    if hasattr(sys, '_MEIPASS') and '-debug' in sys.argv[0].lower():
-                        print("[DEBUG] 检测到未完成的更新日志")
-                    # 清理旧的不完整日志，避免下次启动时再次提示
-                    AutoUpdater.clear_update_log()
         except Exception as e:
             # 只在调试模式下显示错误
             if hasattr(sys, '_MEIPASS') and '-debug' in sys.argv[0].lower():
@@ -3344,29 +3201,42 @@ python3 "{external_script}" '{update_info_json}'
             self.log(f"发现新版本: {data['version']}")
             ver = data.get('version', '?')
             body = (data.get('body') or '').strip()
+            
+            # 尝试将Markdown转换为HTML以便更好地显示
+            formatted_body = self._format_update_message(body)
+            
             message = f"发现新版 v{ver}，是否立即更新？"
-            if body:
-                message += f"\n\n更新内容:\n{body[:800]}"
+            if formatted_body:
+                message += f"\n\n更新内容:\n{formatted_body[:1000]}"
+            
+            message += "\n\n点击'是'将打开GitHub发布页面进行手动下载。"
+            
             if messagebox.askyesno("发现新版本", message):
-                self.log("开始下载更新包...")
-                threading.Thread(target=lambda: self.updater.apply_release(data, restart=True), daemon=True).start()
+                self.log("正在打开GitHub发布页面...")
+                # 跳转到GitHub发布页面
+                releases_url = f"https://github.com/{__github_repo__}/releases/latest"
+                try:
+                    import webbrowser
+                    webbrowser.open(releases_url)
+                    self.log(f"已在浏览器中打开GitHub发布页面: {releases_url}")
+                except Exception as e:
+                    self.log(f"打开浏览器失败: {e}")
+                    messagebox.showinfo("发布页面链接", f"请手动访问以下链接下载新版本:\n\n{releases_url}")
         elif event == 'no_update':
             self.log("当前已是最新版本。")
             messagebox.showinfo("检查更新", "当前已是最新版本。")
         elif event == 'download_start':
-            self.update_progress(0, "开始下载更新包...")
+            # 不再支持自动下载，改为提示用户
+            self.log("自动下载功能已禁用，请使用GitHub发布页面手动下载。")
         elif event == 'download_progress':
-            percent = data.get('percent', 0.0)
-            total = data.get('total', 0)
-            current = data.get('current', 0)
-            total_kb = max(total, 1) // 1024
-            self.update_progress(percent, f"正在下载更新包: {current//1024}KB / {total_kb}KB ({percent:.1f}%)")
+            # 不再支持自动下载
+            pass
         elif event == 'download_complete':
-            self.log("更新包下载完成，正在解压准备安装。")
-            self.update_progress(100, "下载完成，准备安装...")
+            # 不再支持自动下载
+            pass
         elif event == 'install_ready':
-            self.log("更新文件已准备完成，等待程序退出以完成替换。")
-            messagebox.showinfo("准备安装", "更新文件已准备完成，点击确定后程序将退出以完成替换。")
+            # 不再支持自动安装
+            pass
         elif event == 'helper_started':
             self.log("更新助手已启动，程序即将退出。")
             self.update_progress(100, "更新助手已启动，程序即将退出...")

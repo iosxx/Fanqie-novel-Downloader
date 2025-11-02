@@ -41,7 +41,7 @@ CONFIG = {
     "request_rate_limit": 0.5,
     "api_base_url": "http://101.34.64.209:9999",
     "api_endpoint": "/api/content",
-    "tomato_api_base": "http://43.248.77.205:55555",
+    "tomato_api_base": "http://101.34.64.209:9999",
     "tomato_endpoints": {
         "search": "/api/search",
         "detail": "/api/detail",

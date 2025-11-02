@@ -33,12 +33,10 @@ a = Analysis(
         # 确保Pillow的二进制文件被包含
     ],
     datas=[
-        ('updater.py', '.'),
-        ('external_updater.py', '.'),
         ('config.py', '.'),
     ] + fake_useragent_datas,
-    # 额外强制包含本地更新相关模块
-    hiddenimports=(extra_hidden + ['updater', 'external_updater', 'config']),
+    # 额外强制包含本地配置模块
+    hiddenimports=(extra_hidden + ['config']),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['runtime_hook.py'],

@@ -214,10 +214,8 @@ def get_hidden_imports():
     hidden_imports.extend(IMPLICIT_DEPENDENCIES)
     
     # 加入本地模块（PyInstaller 有时不会解析到函数/方法内的导入）
-    # 确保自动更新与配置模块被正确打包
+    # 确保配置模块被正确打包
     hidden_imports.extend([
-        'updater',
-        'external_updater',
         'config',
     ])
 
